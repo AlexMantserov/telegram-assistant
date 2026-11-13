@@ -5,8 +5,10 @@
 
 Условия: несколько вариантов через «;» (подходит любой). Все заполненные условия
 в строке должны выполняться. Пустые условия не проверяются, но хотя бы одно нужно.
-Действия: уведомить, спам, ответить, пропустить. Правила проверяются сверху вниз,
-срабатывает первое подходящее.
+Действия: уведомить, спам, не спам, ответить, пропустить. Правила проверяются сверху вниз,
+срабатывает первое подходящее. «Не спам» проверяется отдельно: такое письмо никогда не
+переносится в «Спам» (ни по заголовкам, ни по правилу, ни по мнению Claude), а остальные
+правила (уведомить, ответить) к нему применяются как обычно.
 """
 
 import logging
@@ -34,6 +36,7 @@ EXAMPLES = [
     ["нет", "@важный-клиент.ru", "", "", "уведомить", "", "", "Пример: письма от клиента — сразу в Telegram"],
     ["нет", "", "заказ; счёт; оплата", "", "уведомить", "", "", "Пример: слова в теме"],
     ["нет", "", "", "казино; выигрыш; viagra", "спам", "", "", "Пример: спам по словам в тексте"],
+    ["нет", "info@partner.ru", "", "", "не спам", "", "", "Пример: письма от адреса никогда не переносить в «Спам»"],
     [
         "нет",
         "",
@@ -46,7 +49,8 @@ EXAMPLES = [
     ],
 ]
 
-ACTIONS = {"уведомить", "спам", "ответить", "пропустить"}
+NOT_SPAM = "не спам"
+ACTIONS = {"уведомить", "спам", NOT_SPAM, "ответить", "пропустить"}
 YES = {"да", "yes", "1", "+", "true", "вкл"}
 
 
@@ -116,7 +120,9 @@ class RulesSheet:
             enabled, sender, subject, text, action, reply, auto, comment = (c.strip() for c in row)
             if not any(row) or enabled.lower() not in YES:
                 continue
-            action = action.lower()
+            action = " ".join(action.lower().replace("-", " ").split())
+            if action == "неспам":
+                action = NOT_SPAM
             if action not in ACTIONS:
                 errors.append(f"строка {i}: непонятное действие «{action}»")
                 continue
@@ -142,7 +148,12 @@ class RulesSheet:
         return rules
 
     def match(self, mail: Mail) -> Rule | None:
-        return next((r for r in self.rules if r.matches(mail)), None)
+        """Первое подходящее правило с действием (без «не спам»)."""
+        return next((r for r in self.rules if r.action != NOT_SPAM and r.matches(mail)), None)
+
+    def not_spam(self, mail: Mail) -> Rule | None:
+        """Правило «не спам», под которое подходит письмо."""
+        return next((r for r in self.rules if r.action == NOT_SPAM and r.matches(mail)), None)
 
 
 def fill_reply(template: str, mail: Mail) -> str:

@@ -149,8 +149,13 @@ class MailWorker:
     async def _process(self, mail: Mail, spam: list[str]) -> int:
         """Обрабатывает одно письмо. Возвращает 1, если написал владельцу."""
         rule = self.rules.match(mail) if self.rules else None
-        # Правило «пропустить» или «уведомить» важнее пометки фильтра (например, для своих клиентов).
-        if self.spam_by_headers and mail.spam_flag and not (rule and rule.action != "спам"):
+        keep = self.rules.not_spam(mail) if self.rules else None
+        if keep:
+            log.info("Письмо %s: правило «не спам» в строке %s", mail.uid, keep.row)
+            if rule and rule.action == "спам":
+                rule = None
+        # Правило «не спам», «пропустить» или «уведомить» важнее пометки фильтра.
+        if self.spam_by_headers and mail.spam_flag and not keep and not (rule and rule.action != "спам"):
             await asyncio.to_thread(self.client.move_to_spam, mail.uid)
             spam.append(f"• {mail.sender} — {mail.subject} (фильтр сервера: {mail.spam_flag})")
             return 0
@@ -178,7 +183,7 @@ class MailWorker:
             result = await classify_mail(self.claude, mail.sender_display, mail.subject, mail.text)
             category, summary = result["category"], result["summary"]
             log.info("Письмо %s: Claude → %s", mail.uid, category)
-            if category == "spam":
+            if category == "spam" and not keep:
                 await asyncio.to_thread(self.client.move_to_spam, mail.uid)
                 spam.append(f"• {mail.sender} — {mail.subject} (решил Claude)")
                 return 0
@@ -274,12 +279,14 @@ class MailWorker:
             lines = [title]
             for m in mails:
                 rule = self.rules.match(m) if self.rules else None
+                keep = self.rules.not_spam(m) if self.rules else None
                 verdict = "СПАМ по заголовкам" if m.spam_flag else "не помечено"
                 lines.append(
                     f"\n• {m.sender} — {m.subject or '(без темы)'}\n"
                     f"  фильтр: {verdict}\n"
                     f"  заголовки: {m.spam_headers or 'нет'}\n"
                     f"  правило: {rule.action + ' (' + rule.describe() + ')' if rule else 'нет'}"
+                    + (f"\n  не спам: да ({keep.describe()})" if keep else "")
                 )
             await self._say("\n".join(lines))
 

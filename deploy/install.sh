@@ -75,11 +75,11 @@ check() {  # $1 — название, $2 — адрес, $3 — прокси
   local via="напрямую"; [ -n "$3" ] && via="через прокси"
   echo "$1 ($via): код ${code:-нет}${err:+, ошибка: $err}"
 }
-TG_PROXY=$(pick_proxy TELEGRAM_PROXY)
-AN_PROXY=$(pick_proxy ANTHROPIC_PROXY)
-check "Telegram " https://api.telegram.org "$TG_PROXY"
+TG_PROXY=$(pick_proxy TELEGRAM_PROXY); TG_PROXY=${TG_PROXY/#socks5:/socks5h:}
+AN_PROXY=$(pick_proxy ANTHROPIC_PROXY); AN_PROXY=${AN_PROXY/#socks5:/socks5h:}
+check "Telegram " https://api.telegram.org/bot/getMe "$TG_PROXY"
 check "Anthropic" https://api.anthropic.com/v1/models "$AN_PROXY"
-echo "  Telegram: код 200 или 404 — связь есть."
+echo "  Telegram: код 401 или 404 — связь есть."
 echo "  Anthropic: 401 — связь есть; 403 — страна не поддерживается, нужен зарубежный прокси; 000 — прокси не пропускает."
 
 echo "== 7. Служба systemd"

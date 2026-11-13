@@ -21,6 +21,12 @@ def _proxy(name: str) -> str | None:
     return None if value.lower() in ("", "none") else value
 
 
+def _scheme(url: str | None, old: str, new: str) -> str | None:
+    if url and url.lower().startswith(old):
+        return new + url[len(old):]
+    return url
+
+
 @dataclass(frozen=True)
 class Settings:
     telegram_token: str
@@ -42,6 +48,9 @@ def load_settings() -> Settings:
         claude_effort=os.getenv("CLAUDE_EFFORT", "medium"),
         history_limit=int(os.getenv("HISTORY_LIMIT", "20")),
         # PROXY_URL — общий прокси; TELEGRAM_PROXY / ANTHROPIC_PROXY переопределяют его.
-        telegram_proxy=_proxy("TELEGRAM_PROXY"),
-        anthropic_proxy=_proxy("ANTHROPIC_PROXY"),
+        # Адреса сайтов должен определять сам прокси (удалённый DNS), иначе запросы с
+        # российского сервера не проходят. aiogram передаёт имя хоста прокси сам, но
+        # понимает только socks5://, а клиенту Claude нужен явный socks5h://.
+        telegram_proxy=_scheme(_proxy("TELEGRAM_PROXY"), "socks5h://", "socks5://"),
+        anthropic_proxy=_scheme(_proxy("ANTHROPIC_PROXY"), "socks5://", "socks5h://"),
     )

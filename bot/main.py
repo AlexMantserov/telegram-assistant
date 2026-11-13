@@ -7,6 +7,7 @@ import anthropic
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ChatAction
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import Message
 
@@ -110,7 +111,16 @@ async def main() -> None:
     me = await bot.get_me()
     log.info("Бот @%s запущен, владелец: %s", me.username, settings.owner_id)
     status = "Бот запущен ✅" if chat else "Бот запущен ✅ (без Claude: не задан ключ Anthropic)"
-    await bot.send_message(settings.owner_id, status)
+    try:
+        await bot.send_message(settings.owner_id, status)
+    except TelegramBadRequest:
+        # Telegram не даёт боту писать первым: владелец должен один раз нажать /start.
+        log.warning(
+            "Не удалось написать владельцу %s. Откройте @%s в Telegram и нажмите /start "
+            "(или проверьте OWNER_TELEGRAM_ID).",
+            settings.owner_id,
+            me.username,
+        )
     await dp.start_polling(bot)
 
 

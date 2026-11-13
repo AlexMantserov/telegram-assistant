@@ -18,6 +18,7 @@ from . import mail_client
 from .mail_client import MailClient
 from .mail_worker import MailWorker
 from .rules import RulesSheet
+from .stocks import StocksDigest
 
 TELEGRAM_LIMIT = 4000  # у Telegram лимит 4096 символов на сообщение
 
@@ -51,6 +52,7 @@ def build_router(owner_id: int, chat: ClaudeChat | None) -> Router:
             "/rules — правила обработки писем\n"
             "/folders — папки почтового ящика\n"
             "/lastmail — последние письма и пометки спам-фильтра (/lastmail спам — папка «Спам»)\n"
+            "/stocks — подборка идей по акциям сейчас\n"
             "/reset — начать диалог заново\n"
             "/ping — проверить, что бот работает"
         )
@@ -150,6 +152,11 @@ async def main() -> None:
     else:
         log.info("MAIL_ADDRESS/MAIL_PASSWORD не заданы: почта отключена")
 
+    stocks = None
+    if settings.stocks_enabled:
+        stocks = StocksDigest(bot, settings.owner_id, chat, settings.stocks_time, settings.stocks_count)
+        dp.include_router(stocks.router())
+
     dp.include_router(build_router(settings.owner_id, chat))
 
     me = await bot.get_me()
@@ -157,6 +164,8 @@ async def main() -> None:
     status = "Бот запущен ✅"
     if not chat:
         status += "\nClaude: выключен (нет ключа Anthropic)"
+    if stocks:
+        status += f"\nАкции: подборка по будням в {settings.stocks_time}" + ("" if chat else " (включится с ключом Anthropic)")
     if worker:
         status += f"\nПочта: {settings.mail_address}, проверка раз в {settings.mail_check_minutes} мин."
         status += "\nПравила: " + ("таблица подключена" if worker.rules else "таблица не подключена")
@@ -172,6 +181,8 @@ async def main() -> None:
         )
     if worker:
         asyncio.create_task(worker.run_forever())
+    if stocks and chat:
+        asyncio.create_task(stocks.run_forever())
     await dp.start_polling(bot)
 
 

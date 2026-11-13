@@ -1,3 +1,5 @@
 aiogram==3.31.0
+aiohttp-socks==0.12.0
 anthropic==2.8.0
+httpx2[socks]==2.16.0
 python-dotenv==1.2.4

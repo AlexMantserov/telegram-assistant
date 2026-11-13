@@ -5,6 +5,7 @@ import logging
 
 import anthropic
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ChatAction
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -82,8 +83,10 @@ async def main() -> None:
         model=settings.claude_model,
         effort=settings.claude_effort,
         history_limit=settings.history_limit,
+        proxy=settings.anthropic_proxy,
     )
-    bot = Bot(token=settings.telegram_token)
+    session = AiohttpSession(proxy=settings.telegram_proxy) if settings.telegram_proxy else None
+    bot = Bot(token=settings.telegram_token, session=session)
     dp = Dispatcher()
     dp.include_router(build_router(settings.owner_id, chat))
 

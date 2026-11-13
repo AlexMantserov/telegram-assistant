@@ -3,6 +3,7 @@
 import logging
 
 import anthropic
+import httpx2
 
 log = logging.getLogger(__name__)
 
@@ -14,8 +15,22 @@ SYSTEM_PROMPT = (
 
 
 class ClaudeChat:
-    def __init__(self, api_key: str, model: str, effort: str, history_limit: int):
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        effort: str,
+        history_limit: int,
+        proxy: str | None = None,
+    ):
+        http_client = None
+        if proxy:
+            # Параметр proxy= у клиента SDK не работает, поэтому подключаем прокси через mounts.
+            transport = httpx2.AsyncHTTPTransport(proxy=proxy)
+            http_client = anthropic.DefaultAsyncHttpxClient(
+                mounts={"http://": transport, "https://": transport}
+            )
+        self._client = anthropic.AsyncAnthropic(api_key=api_key, http_client=http_client)
         self._model = model
         self._effort = effort
         self._history_limit = history_limit

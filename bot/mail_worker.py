@@ -225,12 +225,23 @@ class MailWorker:
 
         @router.message(Command("lastmail"))
         async def cmd_lastmail(message: Message) -> None:
+            # «/lastmail спам» — показать письма из папки «Спам»
+            in_spam = any(w in (message.text or "").lower() for w in ("спам", "spam"))
             try:
-                mails = await asyncio.to_thread(self.client.recent, 5)
+                if in_spam:
+                    folder = await asyncio.to_thread(self.client.spam_folder)
+                    if not folder:
+                        await message.answer("Папка «Спам» не найдена.")
+                        return
+                    mails = await asyncio.to_thread(self.client.recent, 10, folder)
+                    title = "Последние 10 писем в папке «Спам»:"
+                else:
+                    mails = await asyncio.to_thread(self.client.recent, 5)
+                    title = "Последние 5 писем во «Входящих» и что о них думает спам-фильтр сервера:"
             except Exception as e:
                 await message.answer(f"⚠️ Ошибка: {e}")
                 return
-            lines = ["Последние 5 писем во «Входящих» и что о них думает спам-фильтр сервера:"]
+            lines = [title]
             for m in mails:
                 rule = self.rules.match(m) if self.rules else None
                 verdict = "СПАМ по заголовкам" if m.spam_flag else "не помечено"

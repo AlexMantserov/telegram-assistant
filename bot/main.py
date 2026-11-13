@@ -14,6 +14,7 @@ from aiogram.types import Message
 
 from .claude_client import ClaudeChat
 from .config import load_settings
+from . import mail_client
 from .mail_client import MailClient
 from .mail_worker import MailWorker
 from .rules import RulesSheet
@@ -48,7 +49,7 @@ def build_router(owner_id: int, chat: ClaudeChat | None) -> Router:
             "Просто напишите вопрос или задачу, и я передам её Claude.\n"
             "/mail — проверить почту сейчас\n"
             "/rules — правила обработки писем\n"
-            "/lastmail — последние письма и пометки спам-фильтра\n"
+            "/lastmail — последние письма и пометки спам-фильтра (/lastmail спам — папка «Спам»)\n"
             "/reset — начать диалог заново\n"
             "/ping — проверить, что бот работает"
         )
@@ -116,6 +117,7 @@ async def main() -> None:
 
     worker = None
     if settings.mail_address and settings.mail_password:
+        mail_client.SPAM_BAR_MIN = settings.mail_spam_bar_min
         client = MailClient(
             settings.mail_address,
             settings.mail_password,

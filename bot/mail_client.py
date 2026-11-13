@@ -82,8 +82,20 @@ def _body_text(msg: email.message.Message) -> str:
     return text[:TEXT_LIMIT]
 
 
+SPAM_BAR_MIN = 0  # 0 — не учитывать X-Spam-Bar; задаётся из настроек (MAIL_SPAM_BAR_MIN)
+
+
+def spam_bar(msg_or_headers) -> int:
+    """Число плюсов в X-Spam-Bar (у reg.ru чем больше, тем «спамнее» письмо)."""
+    value = msg_or_headers.get("X-Spam-Bar") or ""
+    return value.count("+")
+
+
 def _spam_flag(msg: email.message.Message) -> str:
     """Признак спама, который фильтр почтового сервера ставит в служебные заголовки."""
+    bar = spam_bar(msg)
+    if SPAM_BAR_MIN and bar >= SPAM_BAR_MIN:
+        return f"X-Spam-Bar: {bar} плюсов"
     for header in ("X-Spam-Flag", "X-Spam", "X-Spam-Status"):
         value = (msg.get(header) or "").strip()
         if value.lower().startswith(("yes", "true", "spam")):
@@ -168,11 +180,13 @@ class MailClient:
         finally:
             conn.logout()
 
-    def recent(self, count: int = 5) -> list[Mail]:
-        """Последние письма во «Входящих» (не помечает прочитанными)."""
+    def recent(self, count: int = 5, folder: str = "INBOX") -> list[Mail]:
+        """Последние письма в папке (не помечает прочитанными)."""
         conn = self._connect()
         try:
-            conn.select("INBOX", readonly=True)
+            typ, data = conn.select(f'"{folder}"', readonly=True)
+            if typ != "OK":
+                raise RuntimeError(f"Не удалось открыть папку {folder}: {data}")
             _, data = conn.uid("SEARCH", None, "ALL")
             uids = [int(x) for x in (data[0] or b"").split()][-count:]
             mails = []

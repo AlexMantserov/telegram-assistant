@@ -147,6 +147,7 @@ async def main() -> None:
             os.path.join(settings.data_dir, "mail_state.json"),
             settings.mail_spam_by_headers,
             settings.mail_spam_notify,
+            settings.mail_check_time,
         )
         dp.include_router(worker.router())  # раньше основного: перехватывает текст при правке ответа
     else:
@@ -167,7 +168,12 @@ async def main() -> None:
     if stocks:
         status += f"\nАкции: подборка по будням в {settings.stocks_time}" + ("" if chat else " (включится с ключом Anthropic)")
     if worker:
-        status += f"\nПочта: {settings.mail_address}, проверка раз в {settings.mail_check_minutes} мин."
+        when = (
+            f"каждый день в {settings.mail_check_time}"
+            if settings.mail_check_time
+            else f"раз в {settings.mail_check_minutes} мин."
+        )
+        status += f"\nПочта: {settings.mail_address}, проверка {when}, по запросу — /mail"
         status += "\nПравила: " + ("таблица подключена" if worker.rules else "таблица не подключена")
     try:
         await bot.send_message(settings.owner_id, status)

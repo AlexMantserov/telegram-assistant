@@ -1,11 +1,13 @@
 """Периодическая проверка почты: правила из таблицы, Claude для остального, сообщения в Telegram."""
 
 import asyncio
+import datetime as dt
 import json
 import logging
 import os
 import uuid
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
@@ -16,6 +18,7 @@ from .mail_client import Mail, MailClient
 from .rules import RulesSheet, fill_reply
 
 log = logging.getLogger(__name__)
+MSK = ZoneInfo("Europe/Moscow")
 
 PREVIEW = 600  # сколько символов письма показывать в Telegram
 
@@ -43,6 +46,7 @@ class MailWorker:
         state_file: str,
         spam_by_headers: bool = True,
         spam_notify: str = "количество",
+        daily_at: str | None = None,
     ):
         self.bot = bot
         self.owner_id = owner_id
@@ -50,6 +54,7 @@ class MailWorker:
         self.rules = rules
         self.claude = claude
         self.interval = interval_minutes * 60
+        self.daily_at = daily_at  # "07:00" — проверять раз в сутки в это время (Москва)
         self.state_file = state_file
         self.spam_by_headers = spam_by_headers
         self.spam_notify = spam_notify
@@ -75,13 +80,32 @@ class MailWorker:
 
     # ---------- цикл ----------
 
+    async def _safe_check(self) -> None:
+        try:
+            await self.check()
+        except Exception as e:
+            log.exception("Ошибка при проверке почты")
+            await self._say(f"⚠️ Ошибка при проверке почты: {e}")
+
+    def _next_daily(self, now: dt.datetime) -> dt.datetime:
+        h, m = (int(x) for x in self.daily_at.split(":"))
+        run = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        return run if run > now else run + dt.timedelta(days=1)
+
     async def run_forever(self) -> None:
+        if self.daily_at:
+            # Раз в сутки в заданное время. При самом первом запуске сразу подключаем ящик,
+            # чтобы утренняя проверка уже обработала письма, пришедшие за ночь.
+            if self._load_state().get("last_uid") is None:
+                await self._safe_check()
+            while True:
+                now = dt.datetime.now(MSK)
+                run = self._next_daily(now)
+                log.info("Следующая проверка почты: %s", run.strftime("%d.%m %H:%M"))
+                await asyncio.sleep((run - now).total_seconds())
+                await self._safe_check()
         while True:
-            try:
-                await self.check()
-            except Exception as e:
-                log.exception("Ошибка при проверке почты")
-                await self._say(f"⚠️ Ошибка при проверке почты: {e}")
+            await self._safe_check()
             await asyncio.sleep(self.interval)
 
     async def check(self, manual: bool = False) -> str:

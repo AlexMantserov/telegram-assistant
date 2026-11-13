@@ -67,6 +67,7 @@ class Settings:
     mail_smtp_port: int
     mail_spam_folder: str | None
     mail_check_minutes: int
+    mail_check_time: str | None
     rules_sheet_id: str | None
     rules_sheet_name: str
     mail_spam_by_headers: bool
@@ -103,7 +104,8 @@ def load_settings() -> Settings:
         mail_spam_by_headers=os.getenv("MAIL_SPAM_BY_HEADERS", "да").strip().lower() in ("да", "yes", "1", "true"),
         mail_spam_notify=_spam_notify(os.getenv("MAIL_SPAM_NOTIFY", "")),
         mail_spam_bar_min=int(os.getenv("MAIL_SPAM_BAR_MIN", "").strip() or 0),
-        mail_check_minutes=int(os.getenv("MAIL_CHECK_MINUTES", "30")),
+        mail_check_minutes=int(os.getenv("MAIL_CHECK_MINUTES", "").strip() or 30),
+        mail_check_time=_optional("MAIL_CHECK_TIME"),
         rules_sheet_id=_sheet_id(_optional("RULES_SHEET_ID")),
         rules_sheet_name=os.getenv("RULES_SHEET_NAME", "").strip() or "Правила для почты",
         stocks_enabled=os.getenv("STOCKS_ENABLED", "нет").strip().lower() in ("да", "yes", "1", "true"),

@@ -65,15 +65,22 @@ sed -i 's/\r$//' "$APP/.env"   # на случай, если файл прави
 chown -R "$RUN_USER:$RUN_USER" "$APP"
 chmod 600 "$APP/.env"
 
-echo "== 6. Проверка доступа к Claude"
-PROXY_URL=$(grep -E '^(ANTHROPIC_PROXY|PROXY_URL)=.+' "$APP/.env" | sort | head -1 | cut -d= -f2- || true)
-[ "${PROXY_URL,,}" = "none" ] && PROXY_URL=""
-CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 ${PROXY_URL:+--proxy "$PROXY_URL"} https://api.anthropic.com/v1/models || echo 000)
-case "$CODE" in
-  401) echo "api.anthropic.com доступен${PROXY_URL:+ через прокси}." ;;
-  403) echo "ВНИМАНИЕ: Anthropic отклоняет запросы с этого адреса (403, регион не поддерживается). Нужен зарубежный прокси." ;;
-  *)   echo "ВНИМАНИЕ: api.anthropic.com не ответил (код $CODE). Проверьте прокси." ;;
-esac
+echo "== 6. Проверка связи"
+env_get() { grep -E "^$1=.+" "$APP/.env" | head -1 | cut -d= -f2- || true; }
+pick_proxy() { local v; v=$(env_get "$1"); [ -n "$v" ] || v=$(env_get PROXY_URL); [ "${v,,}" = "none" ] && v=""; echo "$v"; }
+check() {  # $1 — название, $2 — адрес, $3 — прокси
+  local code err
+  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 ${3:+--proxy "$3"} "$2" 2>/tmp/tgbot_curl_err) || true
+  err=$(tr -d '\n' </tmp/tgbot_curl_err)
+  local via="напрямую"; [ -n "$3" ] && via="через прокси"
+  echo "$1 ($via): код ${code:-нет}${err:+, ошибка: $err}"
+}
+TG_PROXY=$(pick_proxy TELEGRAM_PROXY)
+AN_PROXY=$(pick_proxy ANTHROPIC_PROXY)
+check "Telegram " https://api.telegram.org "$TG_PROXY"
+check "Anthropic" https://api.anthropic.com/v1/models "$AN_PROXY"
+echo "  Telegram: код 200 или 404 — связь есть."
+echo "  Anthropic: 401 — связь есть; 403 — страна не поддерживается, нужен зарубежный прокси; 000 — прокси не пропускает."
 
 echo "== 7. Служба systemd"
 cp "$APP/deploy/telegram-bot.service" "/etc/systemd/system/$SVC.service"

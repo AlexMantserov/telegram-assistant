@@ -25,7 +25,7 @@ def _proxy(name: str) -> str | None:
 class Settings:
     telegram_token: str
     owner_id: int
-    anthropic_api_key: str
+    anthropic_api_key: str | None
     claude_model: str
     claude_effort: str
     history_limit: int
@@ -37,7 +37,7 @@ def load_settings() -> Settings:
     return Settings(
         telegram_token=_require("TELEGRAM_BOT_TOKEN"),
         owner_id=int(_require("OWNER_TELEGRAM_ID")),
-        anthropic_api_key=_require("ANTHROPIC_API_KEY"),
+        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", "").strip() or None,
         claude_model=os.getenv("CLAUDE_MODEL", "claude-opus-5-5"),
         claude_effort=os.getenv("CLAUDE_EFFORT", "medium"),
         history_limit=int(os.getenv("HISTORY_LIMIT", "20")),

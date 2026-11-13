@@ -106,7 +106,7 @@ def load_settings() -> Settings:
         mail_check_minutes=int(os.getenv("MAIL_CHECK_MINUTES", "30")),
         rules_sheet_id=_sheet_id(_optional("RULES_SHEET_ID")),
         rules_sheet_name=os.getenv("RULES_SHEET_NAME", "").strip() or "Правила для почты",
-        stocks_enabled=os.getenv("STOCKS_ENABLED", "да").strip().lower() in ("да", "yes", "1", "true"),
+        stocks_enabled=os.getenv("STOCKS_ENABLED", "нет").strip().lower() in ("да", "yes", "1", "true"),
         stocks_time=os.getenv("STOCKS_TIME", "").strip() or "08:00",
         stocks_count=int(os.getenv("STOCKS_COUNT", "").strip() or 5),
         google_key_file=os.getenv("GOOGLE_KEY_FILE", os.path.join(ROOT, "google-key.json")),

@@ -229,7 +229,7 @@ class MailWorker:
                     f"Откройте доступ «Редактор» для {self.rules.service_email()}"
                 )
                 return
-            lines = [f"Таблица: {self.rules.url}", f"Включённых правил: {len(rules)}"]
+            lines = [f"Таблица: {self.rules.url}", f"Лист: {self.rules._sheet_name}", f"Включённых правил: {len(rules)}"]
             lines += [f"• строка {r.row}: {r.action} — {r.describe()}" for r in rules]
             if self.rules.errors:
                 lines += ["", "Ошибки:"] + self.rules.errors

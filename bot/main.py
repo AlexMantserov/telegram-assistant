@@ -126,7 +126,9 @@ async def main() -> None:
         )
         rules = None
         if settings.rules_sheet_id:
-            rules = RulesSheet(settings.google_key_file, settings.rules_sheet_id)
+            rules = RulesSheet(
+                settings.google_key_file, settings.rules_sheet_id, settings.rules_sheet_name
+            )
         else:
             log.warning("RULES_SHEET_ID не задан: правила для почты не используются")
         worker = MailWorker(

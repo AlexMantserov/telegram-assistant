@@ -79,9 +79,10 @@ class Rule:
 
 
 class RulesSheet:
-    def __init__(self, key_file: str, sheet_id: str):
+    def __init__(self, key_file: str, sheet_id: str, sheet_name: str = "Правила для почты"):
         self._key_file = key_file
         self._sheet_id = sheet_id
+        self._sheet_name = sheet_name
         self.rules: list[Rule] = []
         self.errors: list[str] = []
 
@@ -97,7 +98,11 @@ class RulesSheet:
 
     def load(self) -> list[Rule]:
         """Читает правила из таблицы (синхронно). Пустой лист заполняет шаблоном."""
-        ws = gspread.service_account(filename=self._key_file).open_by_key(self._sheet_id).sheet1
+        book = gspread.service_account(filename=self._key_file).open_by_key(self._sheet_id)
+        try:
+            ws = book.worksheet(self._sheet_name)
+        except gspread.WorksheetNotFound:
+            ws = book.add_worksheet(self._sheet_name, rows=100, cols=len(HEADER))
         values = ws.get_all_values()
         if not any(any(c.strip() for c in row) for row in values):
             ws.update([HEADER] + EXAMPLES, "A1")

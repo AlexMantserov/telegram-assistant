@@ -3,6 +3,7 @@
 Все функции синхронные: вызывайте их через asyncio.to_thread.
 """
 
+import base64
 import email
 import imaplib
 import logging
@@ -19,9 +20,47 @@ log = logging.getLogger(__name__)
 
 TEXT_LIMIT = 4000  # сколько символов текста письма храним
 
-# Названия папок в IMAP закодированы в modified UTF-7: "&BCEEPwQwBDw-" — это «Спам».
-SPAM_NAMES = ("spam", "junk", "&bcEepwqwbdw-")
-SENT_NAMES = ("sent", "&bb4eqgqebdcemaqdbdc-")  # «Отправленные»
+SPAM_NAMES = ("spam", "junk", "спам")
+SENT_NAMES = ("sent", "отправленные")
+
+
+# Названия папок в IMAP передаются в «modified UTF-7» (RFC 3501): «Спам» = "&BCEEPwQwBDw-".
+def utf7_encode(name: str) -> str:
+    result, buf = [], []
+
+    def flush():
+        if buf:
+            b64 = base64.b64encode("".join(buf).encode("utf-16-be")).decode().rstrip("=")
+            result.append("&" + b64.replace("/", ",") + "-")
+            buf.clear()
+
+    for ch in name:
+        if 0x20 <= ord(ch) <= 0x7E:
+            flush()
+            result.append("&-" if ch == "&" else ch)
+        else:
+            buf.append(ch)
+    flush()
+    return "".join(result)
+
+
+def utf7_decode(name: str) -> str:
+    def repl(m: re.Match) -> str:
+        body = m.group(1)
+        if not body:
+            return "&"
+        b64 = body.replace(",", "/")
+        b64 += "=" * (-len(b64) % 4)
+        return base64.b64decode(b64).decode("utf-16-be", errors="replace")
+
+    return re.sub(r"&([^-]*)-", repl, name)
+
+
+def _quote(folder: str) -> str:
+    """Имя папки для команды IMAP: кодировка modified UTF-7 и кавычки."""
+    if any(ord(c) > 0x7E for c in folder):
+        folder = utf7_encode(folder)
+    return '"' + folder.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 @dataclass
@@ -184,7 +223,7 @@ class MailClient:
         """Последние письма в папке (не помечает прочитанными)."""
         conn = self._connect()
         try:
-            typ, data = conn.select(f'"{folder}"', readonly=True)
+            typ, data = conn.select(_quote(folder), readonly=True)
             if typ != "OK":
                 raise RuntimeError(f"Не удалось открыть папку {folder}: {data}")
             _, data = conn.uid("SEARCH", None, "ALL")
@@ -216,7 +255,7 @@ class MailClient:
             if flag.lower() in flags.lower():
                 return name
         for flags, name in folders:
-            if name.lower().split("/")[-1].split(".")[-1] in names:
+            if utf7_decode(name).lower().split("/")[-1].split(".")[-1] in names:
                 return name
         return None
 
@@ -236,7 +275,7 @@ class MailClient:
         conn = self._connect()
         try:
             conn.select("INBOX")
-            quoted = f'"{folder}"'
+            quoted = _quote(folder)
             if "MOVE" in conn.capabilities:
                 typ, data = conn.uid("MOVE", str(uid), quoted)
             else:
@@ -277,7 +316,7 @@ class MailClient:
                     self._sent_folder = self._find_folder(conn, "\\Sent", SENT_NAMES)
                 if self._sent_folder:
                     conn.append(
-                        f'"{self._sent_folder}"',
+                        _quote(self._sent_folder),
                         "\\Seen",
                         imaplib.Time2Internaldate(time.time()),
                         msg.as_bytes(),

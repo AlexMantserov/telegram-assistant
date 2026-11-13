@@ -144,6 +144,7 @@ async def main() -> None:
             settings.mail_check_minutes,
             os.path.join(settings.data_dir, "mail_state.json"),
             settings.mail_spam_by_headers,
+            settings.mail_spam_notify,
         )
         dp.include_router(worker.router())  # раньше основного: перехватывает текст при правке ответа
     else:

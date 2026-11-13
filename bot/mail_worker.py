@@ -42,6 +42,7 @@ class MailWorker:
         interval_minutes: int,
         state_file: str,
         spam_by_headers: bool = True,
+        spam_notify: bool = False,
     ):
         self.bot = bot
         self.owner_id = owner_id
@@ -51,6 +52,7 @@ class MailWorker:
         self.interval = interval_minutes * 60
         self.state_file = state_file
         self.spam_by_headers = spam_by_headers
+        self.spam_notify = spam_notify
         self.drafts: dict[str, Draft] = {}
         self.editing: str | None = None  # id черновика, для которого ждём новый текст
         self._lock = asyncio.Lock()
@@ -110,7 +112,9 @@ class MailWorker:
                 self._save_state({"last_uid": mail.uid, "uidvalidity": validity})
             self._save_state({"last_uid": last_uid, "uidvalidity": validity})
 
-            if spam:
+            for line in spam:
+                log.info("В спам: %s", line)
+            if spam and self.spam_notify:
                 await self._say(f"🗑 Перенесено в спам ({len(spam)}):\n" + "\n".join(spam))
             if first_run:
                 return "Почта подключена. Обрабатываю только письма, пришедшие с этого момента."

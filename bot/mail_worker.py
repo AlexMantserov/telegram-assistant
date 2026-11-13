@@ -42,7 +42,7 @@ class MailWorker:
         interval_minutes: int,
         state_file: str,
         spam_by_headers: bool = True,
-        spam_notify: bool = False,
+        spam_notify: str = "количество",
     ):
         self.bot = bot
         self.owner_id = owner_id
@@ -84,7 +84,7 @@ class MailWorker:
                 await self._say(f"⚠️ Ошибка при проверке почты: {e}")
             await asyncio.sleep(self.interval)
 
-    async def check(self) -> str:
+    async def check(self, manual: bool = False) -> str:
         async with self._lock:
             if self.rules:
                 try:
@@ -114,7 +114,9 @@ class MailWorker:
 
             for line in spam:
                 log.info("В спам: %s", line)
-            if spam and self.spam_notify:
+            if spam and not manual and self.spam_notify == "количество":
+                await self._say(f"🗑 Перенесено в спам: {len(spam)}")
+            elif spam and self.spam_notify == "список":
                 await self._say(f"🗑 Перенесено в спам ({len(spam)}):\n" + "\n".join(spam))
             if first_run:
                 return "Почта подключена. Обрабатываю только письма, пришедшие с этого момента."
@@ -222,7 +224,7 @@ class MailWorker:
         async def cmd_mail(message: Message) -> None:
             await message.answer("Проверяю почту…")
             try:
-                await message.answer(await self.check())
+                await message.answer(await self.check(manual=True))
             except Exception as e:
                 log.exception("Ошибка при ручной проверке почты")
                 await message.answer(f"⚠️ Ошибка: {e}")

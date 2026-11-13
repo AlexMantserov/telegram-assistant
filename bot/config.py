@@ -27,6 +27,16 @@ def _sheet_id(value: str | None) -> str | None:
     return value
 
 
+def _spam_notify(value: str) -> str:
+    """нет — ничего не писать; количество — только число; список (или да) — каждое письмо."""
+    value = value.strip().lower()
+    if value in ("нет", "no", "0", "false"):
+        return "нет"
+    if value in ("список", "да", "yes", "1", "true"):
+        return "список"
+    return "количество"
+
+
 def _proxy(name: str) -> str | None:
     value = (os.getenv(name) or os.getenv("PROXY_URL") or "").strip()
     # "none" позволяет отключить прокси для одного сервиса при заданном PROXY_URL
@@ -61,7 +71,7 @@ class Settings:
     rules_sheet_name: str
     mail_spam_by_headers: bool
     mail_spam_bar_min: int
-    mail_spam_notify: bool
+    mail_spam_notify: str
     google_key_file: str
     data_dir: str
 
@@ -88,7 +98,7 @@ def load_settings() -> Settings:
         mail_smtp_port=int(os.getenv("MAIL_SMTP_PORT", "465")),
         mail_spam_folder=_optional("MAIL_SPAM_FOLDER"),
         mail_spam_by_headers=os.getenv("MAIL_SPAM_BY_HEADERS", "да").strip().lower() in ("да", "yes", "1", "true"),
-        mail_spam_notify=os.getenv("MAIL_SPAM_NOTIFY", "нет").strip().lower() in ("да", "yes", "1", "true"),
+        mail_spam_notify=_spam_notify(os.getenv("MAIL_SPAM_NOTIFY", "")),
         mail_spam_bar_min=int(os.getenv("MAIL_SPAM_BAR_MIN", "").strip() or 0),
         mail_check_minutes=int(os.getenv("MAIL_CHECK_MINUTES", "30")),
         rules_sheet_id=_sheet_id(_optional("RULES_SHEET_ID")),

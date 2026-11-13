@@ -97,11 +97,11 @@ echo "  Anthropic: 401 — связь есть; 403 — страна не под
 if [ -n "$(env_get MAIL_ADDRESS)" ]; then
   (cd "$APP" && runuser -u "$RUN_USER" -- .venv/bin/python -c '
 from bot.config import load_settings
-from bot.mail_client import MailClient
+from bot.mail_client import MailClient, utf7_decode
 s = load_settings()
 c = MailClient(s.mail_address, s.mail_password, s.mail_imap_host, s.mail_imap_port, s.mail_smtp_host, s.mail_smtp_port, s.mail_spam_folder)
 c.check_login()
-print("Почта: вход выполнен, папка спама:", c.spam_folder() or "НЕ НАЙДЕНА (укажите MAIL_SPAM_FOLDER)")
+f = c.spam_folder(); print("Почта: вход выполнен, папка спама:", utf7_decode(f) if f else "НЕ НАЙДЕНА (укажите MAIL_SPAM_FOLDER)")
 ' 2>&1 | tail -1) || true
 fi
 if [ -f "$APP/google-key.json" ]; then

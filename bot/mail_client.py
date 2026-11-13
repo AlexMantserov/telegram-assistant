@@ -175,7 +175,8 @@ class MailClient:
         self._password = password
         self._imap_host, self._imap_port = imap_host, imap_port
         self._smtp_host, self._smtp_port = smtp_host, smtp_port
-        self._spam_folder = spam_folder
+        self._spam_wanted = spam_folder  # название из настроек (как написал человек)
+        self._spam_folder: str | None = None  # точное имя папки на сервере
         self._sent_folder: str | None = None
 
     # ---------- IMAP ----------
@@ -259,11 +260,35 @@ class MailClient:
                 return name
         return None
 
+    def folder_names(self) -> list[str]:
+        """Названия всех папок ящика в читаемом виде."""
+        conn = self._connect()
+        try:
+            return [utf7_decode(name) for _, name in self._folders(conn)]
+        finally:
+            conn.logout()
+
     def spam_folder(self) -> str | None:
         if not self._spam_folder:
             conn = self._connect()
             try:
-                self._spam_folder = self._find_folder(conn, "\\Junk", SPAM_NAMES)
+                if self._spam_wanted:
+                    # Сравниваем без учёта регистра и с полным путём, и с последней частью имени.
+                    wanted = self._spam_wanted.strip().lower()
+                    for _, name in self._folders(conn):
+                        readable = utf7_decode(name).lower()
+                        last = readable.split("/")[-1].split(".")[-1]
+                        if wanted in (readable, last):
+                            self._spam_folder = name
+                            break
+                    if not self._spam_folder:
+                        names = ", ".join(utf7_decode(n) for _, n in self._folders(conn))
+                        raise RuntimeError(
+                            f"Папки «{self._spam_wanted}» нет в ящике. Есть папки: {names}. "
+                            "Исправьте MAIL_SPAM_FOLDER в .env или оставьте пустым."
+                        )
+                else:
+                    self._spam_folder = self._find_folder(conn, "\\Junk", SPAM_NAMES)
             finally:
                 conn.logout()
         return self._spam_folder

@@ -253,6 +253,21 @@ class MailWorker:
                 )
             await self._say("\n".join(lines))
 
+        @router.message(Command("folders"))
+        async def cmd_folders(message: Message) -> None:
+            try:
+                names = await asyncio.to_thread(self.client.folder_names)
+                spam = await asyncio.to_thread(self.client.spam_folder)
+            except Exception as e:
+                await message.answer(f"⚠️ Ошибка: {e}")
+                return
+            from .mail_client import utf7_decode
+
+            await message.answer(
+                "Папки ящика:\n" + "\n".join(f"• {n}" for n in names)
+                + f"\n\nПапка для спама: {utf7_decode(spam) if spam else 'не найдена'}"
+            )
+
         @router.message(Command("rules"))
         async def cmd_rules(message: Message) -> None:
             if not self.rules:

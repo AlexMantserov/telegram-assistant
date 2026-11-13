@@ -5,13 +5,25 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
-load_dotenv()
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv(os.path.join(ROOT, ".env"))
 
 
 def _require(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
         raise RuntimeError(f"Не задана переменная окружения {name} (см. .env.example)")
+    return value
+
+
+def _optional(name: str) -> str | None:
+    return os.getenv(name, "").strip() or None
+
+
+def _sheet_id(value: str | None) -> str | None:
+    """Принимает и ID таблицы, и полную ссылку на неё."""
+    if value and "/d/" in value:
+        return value.split("/d/", 1)[1].split("/", 1)[0]
     return value
 
 
@@ -37,6 +49,17 @@ class Settings:
     history_limit: int
     telegram_proxy: str | None
     anthropic_proxy: str | None
+    mail_address: str | None
+    mail_password: str | None
+    mail_imap_host: str
+    mail_imap_port: int
+    mail_smtp_host: str
+    mail_smtp_port: int
+    mail_spam_folder: str | None
+    mail_check_minutes: int
+    rules_sheet_id: str | None
+    google_key_file: str
+    data_dir: str
 
 
 def load_settings() -> Settings:
@@ -53,4 +76,15 @@ def load_settings() -> Settings:
         # понимает только socks5://, а клиенту Claude нужен явный socks5h://.
         telegram_proxy=_scheme(_proxy("TELEGRAM_PROXY"), "socks5h://", "socks5://"),
         anthropic_proxy=_scheme(_proxy("ANTHROPIC_PROXY"), "socks5://", "socks5h://"),
+        mail_address=_optional("MAIL_ADDRESS"),
+        mail_password=_optional("MAIL_PASSWORD"),
+        mail_imap_host=os.getenv("MAIL_IMAP_HOST", "mail.hosting.reg.ru"),
+        mail_imap_port=int(os.getenv("MAIL_IMAP_PORT", "993")),
+        mail_smtp_host=os.getenv("MAIL_SMTP_HOST", "mail.hosting.reg.ru"),
+        mail_smtp_port=int(os.getenv("MAIL_SMTP_PORT", "465")),
+        mail_spam_folder=_optional("MAIL_SPAM_FOLDER"),
+        mail_check_minutes=int(os.getenv("MAIL_CHECK_MINUTES", "30")),
+        rules_sheet_id=_sheet_id(_optional("RULES_SHEET_ID")),
+        google_key_file=os.getenv("GOOGLE_KEY_FILE", os.path.join(ROOT, "google-key.json")),
+        data_dir=os.getenv("DATA_DIR", os.path.join(ROOT, "data")),
     )

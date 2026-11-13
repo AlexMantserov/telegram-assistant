@@ -62,8 +62,21 @@ if [ ! -f "$APP/.env" ]; then
   exit 1
 fi
 sed -i 's/\r$//' "$APP/.env"   # на случай, если файл правили в Windows
+# Новые настройки из шаблона дописываем в конец .env, существующие не трогаем
+while IFS= read -r line; do
+  key=${line%%=*}
+  if [[ "$line" =~ ^[A-Z_]+= ]] && ! grep -q "^$key=" "$APP/.env"; then
+    echo "$line" >> "$APP/.env"; echo "  добавлена настройка $key"
+  fi
+done < "$APP/.env.example"
+# Ключ Google: берём тот же сервисный аккаунт, что у moysklad
+if [ ! -f "$APP/google-key.json" ] && [ -f /opt/moysklad/google-key.json ]; then
+  cp /opt/moysklad/google-key.json "$APP/google-key.json"; echo "  скопирован google-key.json из /opt/moysklad"
+fi
+mkdir -p "$APP/data"
 chown -R "$RUN_USER:$RUN_USER" "$APP"
 chmod 600 "$APP/.env"
+[ -f "$APP/google-key.json" ] && chmod 600 "$APP/google-key.json"
 
 echo "== 6. Проверка связи"
 env_get() { grep -E "^$1=.+" "$APP/.env" | head -1 | cut -d= -f2- || true; }
@@ -81,6 +94,20 @@ check "Telegram " https://api.telegram.org/bot/getMe "$TG_PROXY"
 check "Anthropic" https://api.anthropic.com/v1/models "$AN_PROXY"
 echo "  Telegram: код 401 или 404 — связь есть."
 echo "  Anthropic: 401 — связь есть; 403 — страна не поддерживается, нужен зарубежный прокси; 000 — прокси не пропускает."
+if [ -n "$(env_get MAIL_ADDRESS)" ]; then
+  (cd "$APP" && runuser -u "$RUN_USER" -- .venv/bin/python -c '
+from bot.config import load_settings
+from bot.mail_client import MailClient
+s = load_settings()
+c = MailClient(s.mail_address, s.mail_password, s.mail_imap_host, s.mail_imap_port, s.mail_smtp_host, s.mail_smtp_port, s.mail_spam_folder)
+c.check_login()
+print("Почта: вход выполнен, папка спама:", c.spam_folder() or "НЕ НАЙДЕНА (укажите MAIL_SPAM_FOLDER)")
+' 2>&1 | tail -1) || true
+fi
+if [ -f "$APP/google-key.json" ]; then
+  echo "Google: сервисный аккаунт $(grep -o '"client_email": *"[^"]*"' "$APP/google-key.json" | cut -d'"' -f4)"
+  echo "  Откройте таблице с правилами доступ «Редактор» для этого адреса."
+fi
 
 echo "== 7. Служба systemd"
 cp "$APP/deploy/telegram-bot.service" "/etc/systemd/system/$SVC.service"

@@ -1,5 +1,6 @@
 """Обёртка над Claude API: хранит короткую историю диалога и возвращает текст ответа."""
 
+import json
 import logging
 
 import anthropic
@@ -70,3 +71,44 @@ class ClaudeChat:
             }
         ]
         return answer or "(пустой ответ)"
+
+
+MAIL_SYSTEM = (
+    "Ты разбираешь входящую почту владельца небольшого бизнеса. Определи категорию письма: "
+    "spam — реклама, рассылки, мошенничество, письма, которые владелец не ждёт; "
+    "important — письма от людей, которые ждут ответа или действия (клиенты, партнёры, "
+    "счета, заказы, проблемы); normal — всё остальное (уведомления сервисов, новости). "
+    "В summary в одном-двух предложениях по-русски напиши, о чём письмо и что от владельца хотят."
+)
+
+MAIL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "category": {"type": "string", "enum": ["spam", "important", "normal"]},
+        "summary": {"type": "string"},
+    },
+    "required": ["category", "summary"],
+    "additionalProperties": False,
+}
+
+
+async def classify_mail(chat: "ClaudeChat", sender: str, subject: str, text: str) -> dict:
+    """Категория письма от Claude: {"category": spam|important|normal, "summary": "..."}."""
+    response = await chat._client.beta.messages.create(
+        model=chat._model,
+        max_tokens=2000,
+        system=MAIL_SYSTEM,
+        messages=[
+            {
+                "role": "user",
+                "content": f"От: {sender}\nТема: {subject}\n\n{text[:3000]}",
+            }
+        ],
+        output_config={"effort": "low", "format": {"type": "json_schema", "schema": MAIL_SCHEMA}},
+        betas=["server-side-fallback-2026-07-01"],
+        fallbacks="default",
+    )
+    if response.stop_reason == "refusal":
+        return {"category": "normal", "summary": "Claude отказался разбирать это письмо."}
+    raw = next(b.text for b in response.content if b.type == "text")
+    return json.loads(raw)

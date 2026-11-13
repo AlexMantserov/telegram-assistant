@@ -40,7 +40,9 @@ fi
 echo "== 3. Код бота"
 id "$RUN_USER" >/dev/null 2>&1 || useradd --system --home "$APP" --shell /usr/sbin/nologin "$RUN_USER"
 if [ -d "$APP/.git" ]; then
-  git -C "$APP" fetch -q origin main && git -C "$APP" reset -q --hard origin/main
+  # Папка принадлежит пользователю бота, а git запускается от root — разрешаем явно.
+  git -c safe.directory="$APP" -C "$APP" fetch -q origin main
+  git -c safe.directory="$APP" -C "$APP" reset -q --hard origin/main
 else
   git clone -q "$REPO" "$APP"
 fi

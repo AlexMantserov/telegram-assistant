@@ -281,6 +281,9 @@ class MailClient:
                         if wanted in (readable, last):
                             self._spam_folder = name
                             break
+                    if not self._spam_folder and wanted in SPAM_NAMES:
+                        # В веб-почте папка Junk показывается как «Спам» — это она.
+                        self._spam_folder = self._find_folder(conn, "\\Junk", SPAM_NAMES)
                     if not self._spam_folder:
                         names = ", ".join(utf7_decode(n) for _, n in self._folders(conn))
                         raise RuntimeError(

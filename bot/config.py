@@ -59,6 +59,7 @@ class Settings:
     mail_check_minutes: int
     rules_sheet_id: str | None
     rules_sheet_name: str
+    mail_spam_by_headers: bool
     google_key_file: str
     data_dir: str
 
@@ -84,6 +85,7 @@ def load_settings() -> Settings:
         mail_smtp_host=os.getenv("MAIL_SMTP_HOST", "mail.hosting.reg.ru"),
         mail_smtp_port=int(os.getenv("MAIL_SMTP_PORT", "465")),
         mail_spam_folder=_optional("MAIL_SPAM_FOLDER"),
+        mail_spam_by_headers=os.getenv("MAIL_SPAM_BY_HEADERS", "да").strip().lower() in ("да", "yes", "1", "true"),
         mail_check_minutes=int(os.getenv("MAIL_CHECK_MINUTES", "30")),
         rules_sheet_id=_sheet_id(_optional("RULES_SHEET_ID")),
         rules_sheet_name=os.getenv("RULES_SHEET_NAME", "").strip() or "Правила для почты",

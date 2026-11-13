@@ -48,6 +48,7 @@ def build_router(owner_id: int, chat: ClaudeChat | None) -> Router:
             "Просто напишите вопрос или задачу, и я передам её Claude.\n"
             "/mail — проверить почту сейчас\n"
             "/rules — правила обработки писем\n"
+            "/lastmail — последние письма и пометки спам-фильтра\n"
             "/reset — начать диалог заново\n"
             "/ping — проверить, что бот работает"
         )
@@ -139,6 +140,7 @@ async def main() -> None:
             chat,
             settings.mail_check_minutes,
             os.path.join(settings.data_dir, "mail_state.json"),
+            settings.mail_spam_by_headers,
         )
         dp.include_router(worker.router())  # раньше основного: перехватывает текст при правке ответа
     else:

@@ -33,6 +33,8 @@ class Mail:
     text: str
     message_id: str
     references: str
+    spam_flag: str = ""  # непусто, если спам-фильтр сервера пометил письмо в заголовках
+    spam_headers: str = ""  # все заголовки спам-фильтра (для команды /lastmail)
 
     @property
     def sender_display(self) -> str:
@@ -80,6 +82,15 @@ def _body_text(msg: email.message.Message) -> str:
     return text[:TEXT_LIMIT]
 
 
+def _spam_flag(msg: email.message.Message) -> str:
+    """Признак спама, который фильтр почтового сервера ставит в служебные заголовки."""
+    for header in ("X-Spam-Flag", "X-Spam", "X-Spam-Status"):
+        value = (msg.get(header) or "").strip()
+        if value.lower().startswith(("yes", "true", "spam")):
+            return f"{header}: {value.split(',')[0]}"
+    return ""
+
+
 def parse_mail(uid: int, raw: bytes) -> Mail:
     msg = email.message_from_bytes(raw)
     name, addr = parseaddr(_decode(msg.get("From")))
@@ -91,6 +102,10 @@ def parse_mail(uid: int, raw: bytes) -> Mail:
         text=_body_text(msg),
         message_id=(msg.get("Message-ID") or "").strip(),
         references=(msg.get("References") or "").strip(),
+        spam_flag=_spam_flag(msg),
+        spam_headers="; ".join(
+            f"{k}: {str(v)[:80]}" for k, v in msg.items() if "spam" in k.lower()
+        ),
     )
 
 
@@ -150,6 +165,23 @@ class MailClient:
                 if raw:
                     mails.append(parse_mail(uid, raw))
             return mails, max(max_uid, last_uid), current_validity
+        finally:
+            conn.logout()
+
+    def recent(self, count: int = 5) -> list[Mail]:
+        """Последние письма во «Входящих» (не помечает прочитанными)."""
+        conn = self._connect()
+        try:
+            conn.select("INBOX", readonly=True)
+            _, data = conn.uid("SEARCH", None, "ALL")
+            uids = [int(x) for x in (data[0] or b"").split()][-count:]
+            mails = []
+            for uid in reversed(uids):
+                _, msg_data = conn.uid("FETCH", str(uid), "(BODY.PEEK[])")
+                raw = next((part[1] for part in msg_data if isinstance(part, tuple)), None)
+                if raw:
+                    mails.append(parse_mail(uid, raw))
+            return mails
         finally:
             conn.logout()
 

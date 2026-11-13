@@ -41,6 +41,7 @@ class MailWorker:
         claude: ClaudeChat | None,
         interval_minutes: int,
         state_file: str,
+        spam_by_headers: bool = True,
     ):
         self.bot = bot
         self.owner_id = owner_id
@@ -49,6 +50,7 @@ class MailWorker:
         self.claude = claude
         self.interval = interval_minutes * 60
         self.state_file = state_file
+        self.spam_by_headers = spam_by_headers
         self.drafts: dict[str, Draft] = {}
         self.editing: str | None = None  # id черновика, для которого ждём новый текст
         self._lock = asyncio.Lock()
@@ -117,6 +119,11 @@ class MailWorker:
     async def _process(self, mail: Mail, spam: list[str]) -> int:
         """Обрабатывает одно письмо. Возвращает 1, если написал владельцу."""
         rule = self.rules.match(mail) if self.rules else None
+        # Правило «пропустить» или «уведомить» важнее пометки фильтра (например, для своих клиентов).
+        if self.spam_by_headers and mail.spam_flag and not (rule and rule.action != "спам"):
+            await asyncio.to_thread(self.client.move_to_spam, mail.uid)
+            spam.append(f"• {mail.sender} — {mail.subject} (фильтр сервера: {mail.spam_flag})")
+            return 0
         if rule:
             log.info("Письмо %s: правило в строке %s (%s)", mail.uid, rule.row, rule.action)
             if rule.action == "пропустить":
@@ -215,6 +222,25 @@ class MailWorker:
             except Exception as e:
                 log.exception("Ошибка при ручной проверке почты")
                 await message.answer(f"⚠️ Ошибка: {e}")
+
+        @router.message(Command("lastmail"))
+        async def cmd_lastmail(message: Message) -> None:
+            try:
+                mails = await asyncio.to_thread(self.client.recent, 5)
+            except Exception as e:
+                await message.answer(f"⚠️ Ошибка: {e}")
+                return
+            lines = ["Последние 5 писем во «Входящих» и что о них думает спам-фильтр сервера:"]
+            for m in mails:
+                rule = self.rules.match(m) if self.rules else None
+                verdict = "СПАМ по заголовкам" if m.spam_flag else "не помечено"
+                lines.append(
+                    f"\n• {m.sender} — {m.subject or '(без темы)'}\n"
+                    f"  фильтр: {verdict}\n"
+                    f"  заголовки: {m.spam_headers or 'нет'}\n"
+                    f"  правило: {rule.action + ' (' + rule.describe() + ')' if rule else 'нет'}"
+                )
+            await self._say("\n".join(lines))
 
         @router.message(Command("rules"))
         async def cmd_rules(message: Message) -> None:

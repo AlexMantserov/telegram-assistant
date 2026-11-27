@@ -1,6 +1,8 @@
 """Идеи по акциям Мосбиржи по команде /stocks.
 
 Новости: РБК, Финам и Smart-Lab. Цена — последняя сделка TQBR на iss.moex.com.
+Если источник не ответил, он пропускается одной строкой, подборка всё равно уходит.
+Нет цены — название остаётся, с пометкой что цена недоступна.
 Ключ Anthropic не используется. Ежедневной рассылки нет.
 """
 
@@ -39,6 +41,9 @@ KOMMERSANT_RSS = "https://www.kommersant.ru/RSS/section-finance.xml"
 
 RBC_GAP = "РБК недоступен, для этого пробела взяты новости «Коммерсанта»."
 RBC_GAP_EMPTY = "РБК недоступен, запасной российский источник тоже не открылся."
+FINAM_GAP = "Финам недоступен, этот источник пропущен."
+SMART_GAP = "Smart-Lab недоступен, этот источник пропущен."
+MOEX_GAP = "Мосбиржа (iss.moex.com) недоступна, этот источник пропущен."
 DISCLAIMER = "⚠️ Это не сигнал к покупке."
 
 # Дополнительные имена: короткое имя на бирже часто сокращено (СевСт, Сургнфгз).
@@ -151,7 +156,7 @@ _UPSIDE = re.compile(
 class Stock:
     ticker: str
     name: str
-    price: float
+    price: float | None
 
 
 @dataclass(frozen=True)
@@ -175,8 +180,8 @@ class Signal:
 class Idea:
     ticker: str
     name: str
-    price: float
-    growth_percent: float
+    price: float | None
+    growth_percent: float | None
     horizon: str
     reason: str
     sources: list[str]
@@ -254,9 +259,9 @@ def signal_from_text(text: str) -> Signal | None:
     return None
 
 
-def growth_from_signal(signal: Signal, price: float) -> tuple[float, str, str] | None:
+def growth_from_signal(signal: Signal, price: float | None) -> tuple[float, str, str] | None:
     if signal.kind in ("buyout", "target"):
-        if price <= 0:
+        if price is None or price <= 0:
             return None
         percent = (signal.number / price - 1) * 100
         if not 0 < percent <= 100:
@@ -447,7 +452,7 @@ def aliases_for(secid: str, short: str, secname: str, preferred: bool) -> set[tu
 
 
 def parse_moex(payload: dict) -> dict[str, Stock]:
-    """Бумаги TQBR, у которых есть LAST. Фонды и бумаги без LAST не попадают в словарь."""
+    """Бумаги TQBR, кроме фондов. Нет положительной цены LAST — цена None."""
     securities = payload["securities"]
     marketdata = payload["marketdata"]
     sec_cols = securities["columns"]
@@ -463,13 +468,12 @@ def parse_moex(payload: dict) -> dict[str, Stock]:
     stocks: dict[str, Stock] = {}
     for row in securities["data"]:
         secid = row[i_id]
-        price = prices.get(secid)
-        if price is None:
+        if not secid:
             continue
         short, secname = row[i_short] or "", row[i_name] or ""
         if is_fund(secid, short, secname):
             continue
-        stocks[secid] = Stock(secid, display_name(secid, short, secname), price)
+        stocks[secid] = Stock(secid, display_name(secid, short, secname), prices.get(secid))
     return stocks
 
 
@@ -664,11 +668,26 @@ def _idea_from_hits(stock: Stock, hits: list[_Hit], score: int) -> Idea | None:
         if growth is not None:
             chosen = hit
             break
-    if signaled and growth is None:
+    if signaled and growth is None and stock.price is not None:
         # В новости есть цель или выкуп, но они не выше последней цены.
         return None
     if growth is None:
-        percent, horizon, note = orientir(chosen.item.title)
+        absolute = next(
+            (hit for hit in sorted(signaled, key=rank, reverse=True)
+             if hit.signal and hit.signal.kind in ("buyout", "target")),
+            None,
+        )
+        if absolute is not None and absolute.signal is not None and stock.price is None:
+            # Цель из новости есть, LAST нет — не подставляем ориентир вместо расчёта.
+            chosen = absolute
+            kind = "выкупа" if absolute.signal.kind == "buyout" else "цели"
+            percent, horizon, note = (
+                None,
+                absolute.signal.horizon,
+                f"в новости цена {kind} {_money(absolute.signal.number)}, сравнить не с чем",
+            )
+        else:
+            percent, horizon, note = orientir(chosen.item.title)
     else:
         percent, horizon, note = growth
     reason = one_sentence(chosen.item.title)
@@ -696,26 +715,32 @@ def _pct(value: float) -> str:
     return f"{value:+.1f}%".replace(".", ",")
 
 
-def format_digest(ideas: list[Idea], when: dt.datetime, gap: str | None, asked: int) -> str:
+def format_digest(ideas: list[Idea], when: dt.datetime, gaps: list[str], asked: int) -> str:
     lines = [f"📈 Идеи по акциям на {when.strftime('%d.%m.%Y')}", ""]
-    if gap:
+    notes = [gap for gap in gaps if gap]
+    for gap in notes:
         lines.append(gap)
+    if notes:
         lines.append("")
     if not ideas:
-        lines.append("В свежих новостях не нашлось бумаг Мосбиржи с ценой последней сделки.")
+        lines.append("В свежих новостях не нашлось бумаг для подборки.")
         lines.append("")
         lines.append(DISCLAIMER)
         return "\n".join(lines)
     for index, idea in enumerate(ideas, start=1):
-        lines.append(f"{index}. {idea.name} ({idea.ticker}) — {_money(idea.price)}")
-        lines.append(f"   Рост: {_pct(idea.growth_percent)} ({idea.growth_note})")
+        price = "цена недоступна" if idea.price is None else _money(idea.price)
+        lines.append(f"{index}. {idea.name} ({idea.ticker}) — {price}")
+        if idea.growth_percent is None:
+            lines.append(f"   Рост: {idea.growth_note}")
+        else:
+            lines.append(f"   Рост: {_pct(idea.growth_percent)} ({idea.growth_note})")
         lines.append(f"   Срок: {idea.horizon}")
         lines.append(f"   Почему: {idea.reason}")
         if idea.sources:
             lines.append("   Источники: " + " ".join(idea.sources))
         lines.append("")
     if len(ideas) < asked:
-        lines.append(f"В свежих новостях нашлось {len(ideas)} из {asked} бумаг с ценой последней сделки.")
+        lines.append(f"В свежих новостях нашлось {len(ideas)} из {asked}.")
         lines.append("")
     lines.append(DISCLAIMER)
     return "\n".join(lines)
@@ -734,7 +759,15 @@ async def _fetch(session: aiohttp.ClientSession, url: str, timeout: float) -> st
         return None
 
 
-async def load_news(session: aiohttp.ClientSession) -> tuple[list[NewsItem], str | None]:
+def _feed_ok(text: str | None) -> bool:
+    """Лента действительно открылась, а не страница-заглушка и не обрыв связи."""
+    if not text:
+        return False
+    folded = text.lower()
+    return "<rss" in folded or "<feed" in folded or "<channel" in folded or "<item" in folded
+
+
+async def load_news(session: aiohttp.ClientSession) -> tuple[list[NewsItem], list[str]]:
     rbc_rss_task = asyncio.create_task(_fetch(session, RBC_RSS, 8))
     rbc_page, finam, smart_page, smart_rss = await asyncio.gather(
         _fetch(session, RBC_PAGE, 18),
@@ -751,32 +784,65 @@ async def load_news(session: aiohttp.ClientSession) -> tuple[list[NewsItem], str
             pass
     else:
         rbc = _dedupe(rbc + parse_rss((await rbc_rss_task) or "", "РБК"))
-    news = list(rbc)
-    news.extend(parse_rss(finam or "", "Финам"))
-    news.extend(parse_smartlab_html(smart_page or ""))
-    news.extend(parse_rss(smart_rss or "", "Smart-Lab"))
-    gap = None
-    if not rbc:
+    news: list[NewsItem] = []
+    gaps: list[str] = []
+    if rbc:
+        news.extend(rbc)
+    else:
         fallback = parse_rss(await _fetch(session, KOMMERSANT_RSS, 18) or "", "Коммерсантъ")
         news.extend(fallback)
-        gap = RBC_GAP if fallback else RBC_GAP_EMPTY
+        gaps.append(RBC_GAP if fallback else RBC_GAP_EMPTY)
         log.warning("РБК не отдал новости, запасной источник: %s материалов", len(fallback))
-    return news, gap
+    if _feed_ok(finam):
+        news.extend(parse_rss(finam or "", "Финам"))
+    else:
+        gaps.append(FINAM_GAP)
+        log.warning("Финам не ответил, источник пропущен")
+    smart_items: list[NewsItem] = []
+    if smart_page is not None:
+        smart_items.extend(parse_smartlab_html(smart_page))
+    smart_feed = _feed_ok(smart_rss)
+    if smart_feed:
+        smart_items.extend(parse_rss(smart_rss or "", "Smart-Lab"))
+    if smart_page is None and not smart_feed:
+        gaps.append(SMART_GAP)
+        log.warning("Smart-Lab не ответил, источник пропущен")
+    else:
+        news.extend(smart_items)
+    return news, gaps
 
 
-async def load_stocks(session: aiohttp.ClientSession) -> tuple[dict[str, Stock], dict]:
-    raw = None
-    for attempt in range(2):
-        raw = await _fetch(session, MOEX_URL, 25)
-        if raw:
-            break
-        log.warning("Повторный запрос цен Мосбиржи (%s)", attempt + 1)
-    if not raw:
-        raise RuntimeError("Не удалось получить цены LAST с Мосбиржи (iss.moex.com).")
-    payload = json.loads(raw)
-    stocks = parse_moex(payload)
-    if not stocks:
-        raise RuntimeError("На TQBR нет бумаг с ценой LAST.")
+def _cap_token(part: str) -> str:
+    core = re.sub(r"[^0-9a-zа-я]", "", part)
+    if core and not re.search(r"[аеёиоуыэюяaeiouy]", core):
+        return part.upper()
+    return part[:1].upper() + part[1:]
+
+
+def _offline_name(ticker: str) -> str:
+    if ticker in PRETTY:
+        return PRETTY[ticker]
+    pairs = EXTRA.get(ticker, ())
+    names = [alias for alias, quoted in pairs if not quoted and alias]
+    if not names:
+        names = [alias for alias, quoted in pairs if alias]
+    if not names:
+        return ticker
+    alias = max(names, key=len)
+    return " ".join(_cap_token(part) for part in alias.split(" "))
+
+
+def _offline_board() -> tuple[dict[str, Stock], dict]:
+    """Имена из списка алиасов, когда Мосбиржа не ответила. Цен нет."""
+    stocks: dict[str, Stock] = {}
+    meta: dict[str, tuple[set[tuple[str, bool]], bool]] = {}
+    for ticker in EXTRA:
+        stocks[ticker] = Stock(ticker, _offline_name(ticker), None)
+        meta[ticker] = (aliases_for(ticker, "", "", False), False)
+    return stocks, meta
+
+
+def _meta_from_payload(payload: dict, stocks: dict[str, Stock]) -> dict:
     meta: dict[str, tuple[set[tuple[str, bool]], bool]] = {}
     sec_cols = payload["securities"]["columns"]
     i_id, i_short, i_name = (sec_cols.index(name) for name in ("SECID", "SHORTNAME", "SECNAME"))
@@ -789,7 +855,33 @@ async def load_stocks(session: aiohttp.ClientSession) -> tuple[dict[str, Stock],
         short, secname = row[i_short] or "", row[i_name] or ""
         preferred = is_preferred(short, secname)
         meta[ticker] = (aliases_for(ticker, short, secname, preferred), preferred)
-    return stocks, meta
+    return meta
+
+
+async def load_stocks(session: aiohttp.ClientSession) -> tuple[dict[str, Stock], dict, str | None]:
+    raw = None
+    for attempt in range(2):
+        raw = await _fetch(session, MOEX_URL, 25)
+        if raw:
+            break
+        log.warning("Повторный запрос цен Мосбиржи (%s)", attempt + 1)
+    if not raw:
+        log.warning("Мосбиржа не ответила, подборка без цен")
+        stocks, meta = _offline_board()
+        return stocks, meta, MOEX_GAP
+    try:
+        payload = json.loads(raw)
+        stocks = parse_moex(payload)
+        meta = _meta_from_payload(payload, stocks)
+    except (KeyError, ValueError, TypeError, IndexError) as exc:
+        log.warning("Ответ Мосбиржи не разобран (%s), источник пропущен", type(exc).__name__)
+        stocks, meta = _offline_board()
+        return stocks, meta, MOEX_GAP
+    if not stocks:
+        log.warning("Мосбиржа не отдала бумаги TQBR, источник пропущен")
+        stocks, meta = _offline_board()
+        return stocks, meta, MOEX_GAP
+    return stocks, meta, None
 
 
 async def build_digest(count: int, session: aiohttp.ClientSession | None = None,
@@ -805,12 +897,13 @@ async def build_digest(count: int, session: aiohttp.ClientSession | None = None,
     finally:
         if own:
             await session.close()
-    stocks, meta = stocks_result
-    news, gap = news_result
+    stocks, meta, moex_gap = stocks_result
+    news, news_gaps = news_result
+    gaps = ([moex_gap] if moex_gap else []) + list(news_gaps)
     ideas = build_ideas(stocks, meta, news, count)
     when = now or dt.datetime.now(MSK)
     log.info("Подборка /stocks: %s", ", ".join(idea.ticker for idea in ideas) or "пусто")
-    return format_digest(ideas, when, gap, count)
+    return format_digest(ideas, when, gaps, count)
 
 
 class StocksDigest:

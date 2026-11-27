@@ -155,7 +155,7 @@ async def main() -> None:
 
     stocks = None
     if settings.stocks_enabled:
-        stocks = StocksDigest(bot, settings.owner_id, chat, settings.stocks_time, settings.stocks_count)
+        stocks = StocksDigest(bot, settings.owner_id, settings.stocks_count)
         dp.include_router(stocks.router())
 
     dp.include_router(build_router(settings.owner_id, chat))
@@ -166,7 +166,7 @@ async def main() -> None:
     if not chat:
         status += "\nClaude: выключен (нет ключа Anthropic)"
     if stocks:
-        status += f"\nАкции: подборка по будням в {settings.stocks_time}" + ("" if chat else " (включится с ключом Anthropic)")
+        status += "\nАкции: по команде /stocks"
     if worker:
         when = (
             f"каждый день в {settings.mail_check_time}"
@@ -187,8 +187,6 @@ async def main() -> None:
         )
     if worker:
         asyncio.create_task(worker.run_forever())
-    if stocks and chat:
-        asyncio.create_task(stocks.run_forever())
     await dp.start_polling(bot)
 
 

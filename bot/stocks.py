@@ -1,8 +1,16 @@
-"""Утренние идеи по акциям Мосбиржи: Claude анализирует новости, цены берутся с MOEX."""
+"""Идеи по акциям Мосбиржи по команде /stocks.
+
+Новости: РБК, Финам и Smart-Lab. Цена — последняя сделка TQBR на iss.moex.com.
+Ключ Anthropic не используется. Ежедневной рассылки нет.
+"""
 
 import asyncio
 import datetime as dt
+import html
+import json
 import logging
+import re
+from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -10,236 +18,822 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from .claude_client import ClaudeChat
-
 log = logging.getLogger(__name__)
 MSK = ZoneInfo("Europe/Moscow")
 
-SOURCES = ["https://www.rbc.ru/", "https://www.finam.ru/", "https://yandex.ru/finance"]
-
-SYSTEM = (
-    "Ты аналитик российского фондового рынка. Готовишь для владельца короткую утреннюю "
-    "подборку идей по акциям, торгующимся на Московской бирже (режим TQBR). "
-    "Перед выводами обязательно изучи свежие новости и аналитику минимум из трёх источников; "
-    "среди них должны быть РБК, Финам и Яндекс Финансы (используй веб-поиск и загрузку страниц). "
-    "Опирайся на события последних дней: отчётность, дивиденды, решения ЦБ, отраслевые новости, "
-    "прогнозы аналитиков. Не выдумывай факты и цифры: если данных нет, не включай бумагу. "
-    "Цены не указывай, их подставит программа с биржи. "
-    "Когда закончишь исследование, вызови инструмент submit_ideas ровно один раз."
+HEADERS = {
+    "User-Agent": "telegram-assistant/1.0",
+    "Accept": "text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ru",
+}
+MOEX_URL = (
+    "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json"
+    "?iss.meta=off&securities.columns=SECID,SHORTNAME,SECNAME&marketdata.columns=SECID,LAST"
 )
+RBC_PAGE = "https://www.rbc.ru/finances/"
+RBC_RSS = "https://rssexport.rbc.ru/rbcnews/news/30/full.rss"
+FINAM_RSS = "https://www.finam.ru/analysis/conews/rsspoint/"
+SMART_PAGE = "https://smart-lab.ru/news/"
+SMART_RSS = "https://smart-lab.ru/rss/"
+KOMMERSANT_RSS = "https://www.kommersant.ru/RSS/section-finance.xml"
 
-IDEA_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "ideas": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "ticker": {"type": "string", "description": "Тикер на Мосбирже, например SBER"},
-                    "name": {"type": "string", "description": "Название компании по-русски"},
-                    "growth_percent": {"type": "number", "description": "Ожидаемый рост, %"},
-                    "horizon": {"type": "string", "description": "Срок, например «3 месяца»"},
-                    "reason": {"type": "string", "description": "Почему, 1–2 предложения"},
-                    "sources": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Ссылки на материалы, на которые опирается идея",
-                    },
-                },
-                "required": ["ticker", "name", "growth_percent", "horizon", "reason", "sources"],
-                "additionalProperties": False,
-            },
-        },
-        "market_summary": {"type": "string", "description": "Обстановка на рынке, 1–2 предложения"},
-    },
-    "required": ["ideas", "market_summary"],
-    "additionalProperties": False,
+RBC_GAP = "РБК недоступен, для этого пробела взяты новости «Коммерсанта»."
+RBC_GAP_EMPTY = "РБК недоступен, запасной российский источник тоже не открылся."
+DISCLAIMER = "⚠️ Это не сигнал к покупке."
+
+# Дополнительные имена: короткое имя на бирже часто сокращено (СевСт, Сургнфгз).
+# quoted=True — только в кавычках, чтобы не ловить обычные слова («лента», «полюс»).
+EXTRA: dict[str, tuple[tuple[str, bool], ...]] = {
+    "SBER": (("сбер", False), ("сбербанк", False)),
+    "GAZP": (("газпром", False),),
+    "LKOH": (("лукойл", False),),
+    "GMKN": (("норникель", False), ("норильский никель", False)),
+    "NVTK": (("новатэк", False),),
+    "ROSN": (("роснефть", False),),
+    "TATN": (("татнефть", False),),
+    "SNGS": (("сургутнефтегаз", False),),
+    "CHMF": (("северсталь", False),),
+    "NLMK": (("нлмк", False),),
+    "MAGN": (("ммк", False), ("магнитогорский", False)),
+    "MGNT": (("магнит", True),),
+    "MTSS": (("мтс", False),),
+    "VTBR": (("втб", False),),
+    "PLZL": (("полюс", True),),
+    "YDEX": (("яндекс", False),),
+    "T": (("т-банк", False), ("т-технологии", False), ("тинькофф", False)),
+    "OZON": (("ozon", False), ("озон", True)),
+    "X5": (("x5", False), ("икс 5", False)),
+    "HEAD": (("хэдхантер", False), ("headhunter", False)),
+    "SMLT": (("самолет", True), ("гк самолет", False)),
+    "LSRG": (("лср", False), ("группа лср", False)),
+    "LENT": (("лента", True),),
+    "PHOR": (("фосагро", False),),
+    "AFLT": (("аэрофлот", False),),
+    "DOMRF": (("дом.рф", False),),
+    "GEMC": (("юмг", False),),
+    "LEAS": (("европлан", False),),
+    "CNRU": (("циан", False),),
+    "POSI": (("группа позитив", False),),
+    "ASTR": (("группа астра", False),),
+    "VKCO": (("вконтакте", False),),
+    "MOEX": (("московская биржа", False),),
+    "IRAO": (("интер рао", False),),
+    "ALRS": (("алроса", False),),
+    "RUAL": (("русал", False),),
+    "FLOT": (("совкомфлот", False),),
+    "SVCB": (("совкомбанк", False),),
+    "RTKM": (("ростелеком", False),),
+    "HYDR": (("русгидро", False),),
+    "FEES": (("россети", False),),
+    "PIKK": (("пик", True),),
+    "SIBN": (("газпром нефть", False), ("газпромнефть", False)),
+    "TRNFP": (("транснефть", False),),
+    "UPRO": (("юнипро", False),),
+    "AFKS": (("афк система", False), ("система", True)),
+    "MTLR": (("мечел", False),),
+    "NMTP": (("нмтп", False),),
+    "BANE": (("башнефть", False),),
+    "SGZH": (("сегежа", False),),
+    "FESH": (("fesco", False),),
+    "SELG": (("селигдар", False),),
+    "UGLD": (("югк", False),),
+    "CBOM": (("мкб", False),),
+    "BSPB": (("банк санкт-петербург", False),),
+    "RENI": (("ренессанс страхование", False),),
+    "MDMG": (("мать и дитя", False),),
+    "BELU": (("новабев", False),),
+    "WUSH": (("вуш", False), ("whoosh", False)),
+    "FIXR": (("фикс прайс", False), ("fix price", False)),
+    "ETLN": (("эталон груп", False),),
+    "AQUA": (("инарктика", False),),
 }
 
-TOOLS = [
-    {"type": "web_search_20260209", "name": "web_search", "max_uses": 15},
-    {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 15},
-    {
-        "name": "submit_ideas",
-        "description": "Отправить итоговую подборку идей владельцу.",
-        "strict": True,
-        "eager_input_streaming": True,
-        "input_schema": IDEA_SCHEMA,
-    },
-]
+# Короткое биржевое имя, которое само по себе обычное слово.
+QUOTED_ONLY = {"магнит", "лента", "полюс", "самолет", "озон", "система", "астра", "пик"}
+# Не брать автоматическое имя: слишком общее или это сам индекс, а не бумага.
+DENY_AUTO = QUOTED_ONLY | {
+    "мосбиржа", "энергия", "холдинг", "капитал", "группа", "банк", "россия",
+    "рынок", "акции", "нефть", "газ", "золото", "серебро", "индекс",
+    "позитив", "ренессанс",
+}
+
+NEGATIVE = (
+    "убыт", "падени", "упал", "обвал", "делистинг", "дефолт", "банкрот",
+    "санкц", "сократ", "штраф", "мошеннич", "арест", "уход с биржи",
+)
+CATALYST = (
+    "прибыл", "выручк", "дивиденд", "мсфо", "рсбу", "отчет", "отчёт",
+    "контракт", "поставк", "сделк", "выкуп", "байбек", "рекорд",
+    "добыч", "спг", "месторожд", "целев", "потенциал", "рекоменд",
+    "повыс", "интеграц",
+)
+
+_ENDINGS = "ом|ем|ой|ей|ов|ев|ам|ям|ах|ях|ью|ии|а|я|у|ю|е|ы|и"
+_BUYOUT = re.compile(
+    r"цен\w{0,4}\s+выкупа(?:[^0-9]{0,80}?)(\d+(?:[ \u00a0]\d{3})*(?:[.,]\d+)?)",
+    re.IGNORECASE,
+)
+_TARGET = re.compile(
+    r"целев\w{0,8}\s+цен\w{0,6}(?:[^0-9]{0,80}?)(\d+(?:[ \u00a0]\d{3})*(?:[.,]\d+)?)",
+    re.IGNORECASE,
+)
+_YIELD = re.compile(
+    r"(?:дивиденд\w{0,12}(?:\s+\w+){0,4}\s+доходност\w{0,6}|\bдд)\s*[~:≈]?\s*(\d+(?:[.,]\d+)?)\s*%",
+    re.IGNORECASE,
+)
+_UPSIDE = re.compile(
+    r"(?:потенциал(?:\s+роста)?|апсайд)(?:[^0-9%]{0,20}?)(\d+(?:[.,]\d+)?)\s*%",
+    re.IGNORECASE,
+)
 
 
-def _valid(data: object) -> bool:
-    if not isinstance(data, dict) or not isinstance(data.get("ideas"), list):
-        return False
-    keys = {"ticker", "name", "growth_percent", "horizon", "reason", "sources"}
-    return all(isinstance(i, dict) and keys <= i.keys() for i in data["ideas"])
+@dataclass(frozen=True)
+class Stock:
+    ticker: str
+    name: str
+    price: float
 
 
-async def research(chat: ClaudeChat, count: int) -> dict:
-    """Просит Claude изучить новости и вернуть идеи (через инструмент submit_ideas)."""
-    today = dt.datetime.now(MSK).strftime("%d.%m.%Y")
-    messages: list[dict] = [
-        {
-            "role": "user",
-            "content": (
-                f"Сегодня {today}. Подбери {count} акций Мосбиржи для покупки. "
-                f"Обязательные источники: {', '.join(SOURCES)}. "
-                "Для каждой бумаги дай ожидаемый рост в % и срок, на который её стоит купить."
-            ),
-        }
-    ]
-    for _ in range(8):  # исследование может прерываться (pause_turn) — продолжаем
-        async with chat._client.beta.messages.stream(
-            model=chat._model,
-            max_tokens=32000,
-            system=SYSTEM,
-            messages=messages,
-            tools=TOOLS,
-            output_config={"effort": "high"},
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-        ) as stream:
-            response = await stream.get_final_message()
+@dataclass(frozen=True)
+class NewsItem:
+    source: str
+    title: str
+    url: str
+    summary: str = ""
 
-        if response.stop_reason == "refusal":
-            raise RuntimeError("Claude отказался готовить подборку.")
-        if response.stop_reason == "max_tokens":
-            raise RuntimeError("Ответ Claude оборвался (max_tokens).")
 
-        for block in response.content:
-            if block.type == "tool_use" and block.name == "submit_ideas":
-                if not _valid(block.input):
-                    raise RuntimeError("Claude вернул подборку в неверном формате.")
-                return block.input
+@dataclass(frozen=True)
+class Signal:
+    """Число из текста новости, а не оценка бота."""
 
-        content = [b.model_dump(exclude_none=True) for b in response.content]
-        if response.stop_reason == "pause_turn":
-            # Сервер прервал длинное исследование: отправляем ход обратно, он продолжит сам.
-            if messages[-1]["role"] == "assistant":
-                messages[-1]["content"] = messages[-1]["content"] + content
-            else:
-                messages = messages + [{"role": "assistant", "content": content}]
+    kind: str  # buyout, target, yield, upside
+    number: float
+    horizon: str
+
+
+@dataclass
+class Idea:
+    ticker: str
+    name: str
+    price: float
+    growth_percent: float
+    horizon: str
+    reason: str
+    sources: list[str]
+    growth_note: str
+    score: int = 0
+
+
+@dataclass
+class _Hit:
+    item: NewsItem
+    signal: Signal | None = None
+    in_title: bool = False
+    catalyst: bool = False
+
+
+@dataclass
+class _Alias:
+    ticker: str
+    length: int
+    pattern: re.Pattern
+    text: str = ""
+
+
+def norm(text: str) -> str:
+    text = html.unescape(text or "")
+    text = text.lower().replace("ё", "е").replace("\xa0", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _num(raw: str) -> float:
+    return float(raw.replace(" ", "").replace("\u00a0", "").replace(",", "."))
+
+
+def _year(number: float) -> bool:
+    return number.is_integer() and 1900 <= number <= 2100
+
+
+def _horizon(text: str, default: str) -> str:
+    low = norm(text)
+    if "до конца года" in low:
+        return "до конца года"
+    if re.search(r"\b(12 месяцев|на год|за год|годовых)\b", low):
+        return "12 месяцев"
+    if re.search(r"\b(полгода|6 месяцев)\b", low):
+        return "6 месяцев"
+    if re.search(r"\b(квартал|3 месяца)\b", low):
+        return "3 месяца"
+    return default
+
+
+def signal_from_text(text: str) -> Signal | None:
+    """Цена выкупа, целевая, дивидендная доходность или потенциал — если это прямо написано."""
+    low = norm(text)
+    for match in _BUYOUT.finditer(low):
+        number = _num(match.group(1))
+        if _year(number) or not 1 <= number <= 1_000_000:
             continue
-        if messages[-1]["role"] == "assistant":
-            content = messages[-1]["content"] + content
-            messages = messages[:-1]
-        # Закончил без вызова инструмента — напоминаем один раз.
-        messages = messages + [
-            {"role": "assistant", "content": content},
-            {"role": "user", "content": "Оформи результат вызовом submit_ideas."},
-        ]
-    raise RuntimeError("Claude не завершил подборку.")
-
-
-async def moex_prices(tickers: list[str]) -> dict[str, float]:
-    """Текущие цены акций (TQBR) с Мосбиржи. Если торгов ещё нет — цена закрытия."""
-    if not tickers:
-        return {}
-    url = "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json"
-    params = {
-        "securities": ",".join(tickers),
-        "iss.meta": "off",
-        "iss.only": "securities,marketdata",
-        "securities.columns": "SECID,PREVPRICE",
-        "marketdata.columns": "SECID,LAST,MARKETPRICE",
-    }
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as s:
-        async with s.get(url, params=params) as r:
-            r.raise_for_status()
-            data = await r.json()
-
-    def rows(table: str) -> list[dict]:
-        cols = data[table]["columns"]
-        return [dict(zip(cols, row)) for row in data[table]["data"]]
-
-    prev = {r["SECID"]: r.get("PREVPRICE") for r in rows("securities")}
-    prices: dict[str, float] = {}
-    for r in rows("marketdata"):
-        price = r.get("LAST") or r.get("MARKETPRICE") or prev.get(r["SECID"])
-        if price:
-            prices[r["SECID"]] = float(price)
-    for secid, p in prev.items():
-        if p and secid not in prices:
-            prices[secid] = float(p)
-    return prices
-
-
-def _money(x: float) -> str:
-    return f"{x:,.2f}".replace(",", " ").replace(".", ",") + " ₽"
-
-
-def format_ideas(result: dict, prices: dict[str, float]) -> str:
-    today = dt.datetime.now(MSK).strftime("%d.%m.%Y")
-    lines = [f"📈 Идеи по акциям на {today}", "", result.get("market_summary", "").strip(), ""]
-    n = 0
-    for idea in result["ideas"]:
-        ticker = idea["ticker"].strip().upper()
-        price = prices.get(ticker)
-        if price is None:
-            log.warning("Тикер %s не найден на Мосбирже, пропускаю", ticker)
+        return Signal("buyout", number, "до выкупа")
+    for match in _TARGET.finditer(low):
+        number = _num(match.group(1))
+        if _year(number) or not 1 <= number <= 1_000_000:
             continue
-        n += 1
-        growth = idea["growth_percent"]
-        target = price * (1 + growth / 100)
-        lines.append(f"{n}. {idea['name']} ({ticker}) — {_money(price)}")
-        lines.append(f"   Прогноз: {growth:+.0f}% за {idea['horizon']} (цель ≈ {_money(target)})")
-        lines.append(f"   Почему: {idea['reason'].strip()}")
-        if idea["sources"]:
-            lines.append("   Источники: " + " ".join(idea["sources"][:3]))
-        lines.append("")
-    if not n:
-        lines.append("Не удалось подтвердить ни одного тикера на Мосбирже.")
-    lines.append(
-        "⚠️ Подборку готовит ИИ по открытым новостям. Это не индивидуальная инвестиционная "
-        "рекомендация: прогнозы могут не сбыться, решения принимайте сами."
+        return Signal("target", number, _horizon(low, "6 месяцев"))
+    match = _YIELD.search(low)
+    if match:
+        number = _num(match.group(1))
+        if 0 < number <= 40:
+            return Signal("yield", number, "12 месяцев")
+    match = _UPSIDE.search(low)
+    if match:
+        number = _num(match.group(1))
+        if 0 < number <= 100:
+            return Signal("upside", number, _horizon(low, "6 месяцев"))
+    return None
+
+
+def growth_from_signal(signal: Signal, price: float) -> tuple[float, str, str] | None:
+    if signal.kind in ("buyout", "target"):
+        if price <= 0:
+            return None
+        percent = (signal.number / price - 1) * 100
+        if not 0 < percent <= 100:
+            return None
+        note = "к цене выкупа из новости" if signal.kind == "buyout" else "к целевой цене из новости"
+        return percent, signal.horizon, note
+    if signal.kind == "yield":
+        return signal.number, signal.horizon, "дивидендная доходность из новости"
+    if signal.kind == "upside":
+        return signal.number, signal.horizon, "потенциал из новости"
+    return None
+
+
+def orientir(title: str) -> tuple[float, str, str]:
+    low = norm(title)
+    if any(word in low for word in ("дивиденд", "прибыл", "рекорд", "контракт", "выручк", "мсфо", "рсбу")):
+        return 8.0, "6 месяцев", "ориентир по тону новости"
+    return 5.0, "3 месяца", "ориентир по тону новости"
+
+
+def _negative(title: str) -> bool:
+    low = norm(title)
+    return any(word in low for word in NEGATIVE)
+
+
+def _catalyst(title: str) -> bool:
+    low = norm(title)
+    return any(word in low for word in CATALYST)
+
+
+def one_sentence(title: str) -> str:
+    text = re.sub(r"\s+", " ", html.unescape(title or "")).strip()
+    text = re.sub(r"^[^\w«\"А-Яа-яA-Za-z]+", "", text)
+    text = re.sub(r"\s+[|—-]\s+(Финам|РБК|Smart-Lab|Коммерсантъ).*$", "", text, flags=re.IGNORECASE)
+    # «руб.» и «млрд.» — не конец фразы.
+    shielded = re.sub(
+        r"\b(руб|млрд|млн|тыс|трлн|г|гг)\.",
+        lambda m: m.group(1) + "§",
+        text,
+        flags=re.IGNORECASE,
     )
+    sentence = re.split(r"(?<=[.!?])\s+", shielded, maxsplit=1)[0].strip().replace("§", ".")
+    if len(sentence) > 220:
+        cut = sentence[:217].rsplit(" ", 1)[0]
+        sentence = (cut or sentence[:217]).rstrip(" ,;:") + "…"
+    if sentence and sentence[-1] not in ".!?…":
+        sentence += "."
+    return sentence
+
+
+def _last_word_pattern(word: str) -> str:
+    hyphen = re.fullmatch(r"([а-я]+)-([а-я]+)", word)
+    if hyphen:
+        return re.escape(hyphen.group(1) + "-") + _last_word_pattern(hyphen.group(2))
+    if not re.fullmatch(r"[а-я]+", word):
+        return re.escape(word)
+    if word.endswith("ь") and len(word) >= 4:
+        return re.escape(word[:-1]) + r"(?:ью|и|ь)"
+    if word.endswith(("а", "я")) and len(word) >= 5:
+        return re.escape(word[:-1]) + r"(?:ой|ей|ою|ею|а|я|ы|и|у|ю|е)"
+    if len(word) >= 4:
+        return re.escape(word) + r"(?:" + _ENDINGS + r")?"
+    return re.escape(word)
+
+
+def _alias_pattern(alias: str, quoted: bool) -> re.Pattern:
+    parts = [_last_word_pattern(part) if i == len(alias.split()) - 1 else re.escape(part)
+             for i, part in enumerate(alias.split())]
+    body = r"\s+".join(parts)
+    if quoted:
+        raw = r"[«\"]\s*" + body + r"\s*[»\"]"
+    else:
+        raw = r"(?<![0-9a-zа-я-])" + body + r"(?![0-9a-zа-я-])"
+    return re.compile(raw)
+
+
+def _looks_like_name(name: str) -> bool:
+    if name in DENY_AUTO or len(name) < 5:
+        return False
+    if not re.search(r"[аеёиоуыэюя]", name):
+        return False
+    compact = name.replace(" ", "").replace("-", "")
+    if re.search(r"[бвгджзклмнпрстфхцчшщ]{4,}", compact):
+        return False
+    return all(len(token) >= 4 or "-" in token for token in name.split())
+
+
+def _clean_short(short: str) -> str:
+    name = norm(short)
+    name = re.sub(r"^i(?=[а-яa-z])", "", name)
+    name = re.sub(r"[\s\-]+(ао|ап|п)$", "", name).strip(" -")
+    return re.sub(r"\s+", " ", name).strip()
+
+
+def _prettify(name: str) -> str:
+    letters = re.sub(r"[^A-Za-zА-ЯЁа-яё]", "", name)
+    if letters.isupper() and len(letters) <= 5:
+        return name
+    if letters.isupper():
+        return name.capitalize()
+    return name
+
+
+# Короткое имя на бирже иногда нечитаемо: Газпрнефть, СевСт, Сургнфгз.
+PRETTY = {
+    "SIBN": "Газпром нефть",
+    "CHMF": "Северсталь",
+    "SNGS": "Сургутнефтегаз",
+    "TATN": "Татнефть",
+    "RTKM": "Ростелеком",
+    "TRNFP": "Транснефть",
+    "BANE": "Башнефть",
+    "MTSS": "МТС",
+    "GMKN": "Норникель",
+    "IRAO": "Интер РАО",
+    "T": "Т-Технологии",
+    "LSRG": "Группа ЛСР",
+    "AFKS": "АФК Система",
+    "MAGN": "ММК",
+    "NLMK": "НЛМК",
+    "VTBR": "ВТБ",
+    "YDEX": "Яндекс",
+    "NVTK": "Новатэк",
+    "PHOR": "ФосАгро",
+    "ALRS": "АЛРОСА",
+    "HYDR": "РусГидро",
+    "DOMRF": "ДОМ.РФ",
+    "X5": "ИКС 5",
+    "BSPB": "Банк Санкт-Петербург",
+}
+
+
+def display_name(secid: str, short: str, secname: str) -> str:
+    if secid in PRETTY:
+        return PRETTY[secid]
+    match = re.search(r"[«\"]([^»\"]{2,40})[»\"]", secname or "")
+    if match:
+        name = re.sub(r"\s+", " ", match.group(1)).strip().replace("Нор.Никель", "Норникель")
+        if name and norm(name) not in DENY_AUTO:
+            return _prettify(name)
+    name = re.sub(r"^i(?=[А-ЯЁA-Z])", "", (short or "").strip())
+    name = re.sub(r"[\s\-]+[аА][оОпП]$", "", name).strip()
+    return _prettify(name)
+
+
+def is_fund(secid: str, short: str, secname: str) -> bool:
+    if secid.startswith("RU"):
+        return True
+    blob = f"{short} {secname}".lower()
+    return any(mark in blob for mark in ("etf", "бпиф", "зпиф", "ипиф"))
+
+
+def is_preferred(short: str, secname: str) -> bool:
+    if re.search(r"(ап\.?|акц\.пр\.?)$", (secname or "").lower().strip()):
+        return True
+    return bool(re.search(r"(-п|-ап| ап)$", (short or "").lower().strip()))
+
+
+def _add_alias(bucket: dict[str, set[tuple[str, bool]]], ticker: str, alias: str, quoted: bool) -> None:
+    alias = norm(alias)
+    if len(alias) < 2:
+        return
+    bucket.setdefault(ticker, set()).add((alias, quoted))
+
+
+def aliases_for(secid: str, short: str, secname: str, preferred: bool) -> set[tuple[str, bool]]:
+    bucket: dict[str, set[tuple[str, bool]]] = {}
+    for alias, quoted in EXTRA.get(secid, ()):
+        _add_alias(bucket, secid, alias, quoted)
+    if not preferred:
+        cleaned = _clean_short(short)
+        if cleaned in QUOTED_ONLY:
+            _add_alias(bucket, secid, cleaned, True)
+        elif _looks_like_name(cleaned):
+            _add_alias(bucket, secid, cleaned, False)
+        for match in re.finditer(r"[«\"]([^»\"]{2,40})[»\"]", secname or ""):
+            quoted_name = norm(match.group(1)).replace(".", "")
+            # Одно слово из кавычек. «Санкт-Петербург» и прочие длинные имена с дефисом
+            # оставляем ручному списку, иначе город становится тикером.
+            if " " in quoted_name or "-" in quoted_name or quoted_name in DENY_AUTO:
+                continue
+            if _looks_like_name(quoted_name):
+                _add_alias(bucket, secid, quoted_name, False)
+            elif 3 <= len(quoted_name) <= 6 and quoted_name.isalpha() and not re.search(r"[аеёиоуыэюя]", quoted_name):
+                # Короткий тикер вроде НЛМК, без гласных, чтобы не поймать слово «банк».
+                _add_alias(bucket, secid, quoted_name, False)
+    return bucket.get(secid, set())
+
+
+def parse_moex(payload: dict) -> dict[str, Stock]:
+    """Бумаги TQBR, у которых есть LAST. Фонды и бумаги без LAST не попадают в словарь."""
+    securities = payload["securities"]
+    marketdata = payload["marketdata"]
+    sec_cols = securities["columns"]
+    md_cols = marketdata["columns"]
+    last_at = md_cols.index("LAST")
+    id_at = md_cols.index("SECID")
+    prices: dict[str, float] = {}
+    for row in marketdata["data"]:
+        price = row[last_at]
+        if isinstance(price, (int, float)) and not isinstance(price, bool) and price > 0:
+            prices[row[id_at]] = float(price)
+    i_id, i_short, i_name = (sec_cols.index(name) for name in ("SECID", "SHORTNAME", "SECNAME"))
+    stocks: dict[str, Stock] = {}
+    for row in securities["data"]:
+        secid = row[i_id]
+        price = prices.get(secid)
+        if price is None:
+            continue
+        short, secname = row[i_short] or "", row[i_name] or ""
+        if is_fund(secid, short, secname):
+            continue
+        stocks[secid] = Stock(secid, display_name(secid, short, secname), price)
+    return stocks
+
+
+def compile_aliases(meta: dict[str, tuple[set[tuple[str, bool]], bool]]) -> list[_Alias]:
+    compiled: list[_Alias] = []
+    for ticker, (pairs, _preferred) in meta.items():
+        for alias, quoted in pairs:
+            compiled.append(_Alias(ticker, len(alias), _alias_pattern(alias, quoted), alias))
+    compiled.sort(key=lambda item: item.length, reverse=True)
+    return compiled
+
+
+def match_tickers(text: str, compiled: list[_Alias], ticker_re: re.Pattern | None) -> set[str]:
+    folded = norm(text)
+    occupied: list[tuple[int, int]] = []
+    found: set[str] = set()
+    for alias in compiled:
+        for match in alias.pattern.finditer(folded):
+            span = match.span()
+            if any(span[0] < end and span[1] > start for start, end in occupied):
+                continue
+            occupied.append(span)
+            found.add(alias.ticker)
+            break
+    if ticker_re is not None:
+        found.update(ticker_re.findall(text or ""))
+    return found
+
+
+def _canon_url(url: str) -> str:
+    return (url or "").split("?", 1)[0].rstrip("/")
+
+
+def _dedupe(items: list[NewsItem]) -> list[NewsItem]:
+    seen: set[str] = set()
+    result: list[NewsItem] = []
+    for item in items:
+        key = _canon_url(item.url) or norm(item.title)
+        if not item.title or key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def parse_rss(xml_text: str, source: str) -> list[NewsItem]:
+    if not xml_text or "<item" not in xml_text.lower():
+        return []
+    # В обрезанной ленте может не закрыться CDATA — дочитываем только целые item.
+    items: list[NewsItem] = []
+    for chunk in re.findall(r"<item\b[^>]*>.*?</item>", xml_text, flags=re.IGNORECASE | re.DOTALL):
+        title = _xml_text(chunk, "title")
+        link = _xml_text(chunk, "link")
+        summary = _xml_text(chunk, "description")
+        if not title or not link:
+            continue
+        summary = re.sub(r"<[^>]+>", " ", summary)
+        summary = re.sub(r"\s+", " ", html.unescape(summary)).strip()
+        items.append(NewsItem(source, re.sub(r"\s+", " ", title).strip(), link.strip(), summary[:800]))
+    return _dedupe(items)
+
+
+def _xml_text(chunk: str, tag: str) -> str:
+    match = re.search(rf"<{tag}\b[^>]*>(.*?)</{tag}>", chunk, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return ""
+    raw = match.group(1).strip()
+    raw = re.sub(r"^<!\[CDATA\[", "", raw)
+    raw = re.sub(r"\]\]>$", "", raw)
+    return html.unescape(raw).strip()
+
+
+def parse_rbc_html(page: str) -> list[NewsItem]:
+    if not page:
+        return []
+    match = re.search(
+        r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+        page,
+        flags=re.DOTALL,
+    )
+    items: list[NewsItem] = []
+    if match:
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            payload = None
+        if payload is not None:
+            _walk_rbc(payload, items)
+    return _dedupe(items)
+
+
+def _rbc_url_ok(url: str) -> bool:
+    if "editorial.rbc.ru" in url:
+        return False
+    if any(part in url for part in ("/politics/", "/society/", "/sport/", "/education/", "/auto/", "/style/")):
+        return False
+    return any(part in url for part in ("/finances/", "/quote/", "/economics/", "/business/", "/rbcfreenews/"))
+
+
+def _walk_rbc(node: object, items: list[NewsItem]) -> None:
+    if isinstance(node, dict):
+        url = node.get("url")
+        title = node.get("title")
+        if isinstance(url, str) and isinstance(title, str) and node.get("id") and _rbc_url_ok(url):
+            codes: list[str] = []
+            for ticker in node.get("tickers") or []:
+                if not isinstance(ticker, dict) or ticker.get("type") != "share":
+                    continue
+                code = str(ticker.get("title") or "")
+                if re.fullmatch(r"[A-Z][A-Z0-9]{1,5}", code):
+                    codes.append(code)
+            anons = node.get("anons") or node.get("subtitle") or ""
+            summary = str(anons or "")
+            if codes:
+                summary = (summary + " " + " ".join(codes)).strip()
+            items.append(NewsItem("РБК", str(title).strip(), url, summary[:800]))
+        for value in node.values():
+            _walk_rbc(value, items)
+    elif isinstance(node, list):
+        for value in node:
+            _walk_rbc(value, items)
+
+
+def parse_smartlab_html(page: str) -> list[NewsItem]:
+    if not page:
+        return []
+    items: list[NewsItem] = []
+    for href, title in re.findall(r'href="(/(?:news|blog)/[^"#?]+)"[^>]*>([^<]{15,300})', page):
+        title = re.sub(r"\s+", " ", html.unescape(title)).strip()
+        if len(title) < 20:
+            continue
+        items.append(NewsItem("Smart-Lab", title, "https://smart-lab.ru" + href))
+    return _dedupe(items)
+
+
+def build_ideas(
+    stocks: dict[str, Stock],
+    alias_meta: dict[str, tuple[set[tuple[str, bool]], bool]],
+    news: list[NewsItem],
+    count: int,
+) -> list[Idea]:
+    compiled = compile_aliases(alias_meta)
+    latin = [ticker for ticker in stocks if re.fullmatch(r"[A-Z]{4,6}", ticker)]
+    ticker_re = re.compile(r"(?<![A-Z0-9])(" + "|".join(latin) + r")(?![A-Z0-9])") if latin else None
+    grouped: dict[str, list[_Hit]] = {}
+    for item in news:
+        if _negative(item.title):
+            continue
+        blob = f"{item.title} {item.summary}"
+        for ticker in match_tickers(blob, compiled, ticker_re):
+            if ticker not in stocks:
+                continue
+            title_hit = bool(match_tickers(item.title, compiled, ticker_re) & {ticker})
+            grouped.setdefault(ticker, []).append(
+                _Hit(item, signal_from_text(blob), title_hit, _catalyst(item.title))
+            )
+    ranked: list[tuple[int, bool, str]] = []
+    for ticker, hits in grouped.items():
+        sources = {hit.item.source for hit in hits}
+        extracted = any(hit.signal is not None for hit in hits)
+        catalyst = any(hit.catalyst for hit in hits)
+        score = 5 * len(sources) + min(len(hits), 5)
+        if extracted:
+            score += 12
+        if catalyst:
+            score += 4
+        if any(hit.in_title for hit in hits):
+            score += 2
+        strong = extracted or catalyst or len(sources) >= 2 or len(hits) >= 2
+        ranked.append((score, strong, ticker))
+    ranked.sort(key=lambda row: (row[1], row[0]), reverse=True)
+    # Сначала новости с цифрой, поводом или повторным упоминанием, потом остальные — до count.
+    ideas: list[Idea] = []
+    for score, _strong, ticker in ranked:
+        if len(ideas) >= count:
+            break
+        idea = _idea_from_hits(stocks[ticker], grouped[ticker], score)
+        if idea is not None:
+            ideas.append(idea)
+    return ideas
+
+
+def _idea_from_hits(stock: Stock, hits: list[_Hit], score: int) -> Idea | None:
+    def rank(hit: _Hit) -> tuple[int, int, int]:
+        return (1 if hit.signal else 0, 1 if hit.catalyst else 0, 1 if hit.in_title else 0)
+
+    chosen = max(hits, key=rank)
+    growth = None
+    signaled = [hit for hit in hits if hit.signal is not None]
+    for hit in sorted(signaled, key=rank, reverse=True):
+        growth = growth_from_signal(hit.signal, stock.price) if hit.signal else None
+        if growth is not None:
+            chosen = hit
+            break
+    if signaled and growth is None:
+        # В новости есть цель или выкуп, но они не выше последней цены.
+        return None
+    if growth is None:
+        percent, horizon, note = orientir(chosen.item.title)
+    else:
+        percent, horizon, note = growth
+    reason = one_sentence(chosen.item.title)
+    if not reason:
+        return None
+    links: list[str] = []
+    for hit in sorted(hits, key=rank, reverse=True):
+        url = _canon_url(hit.item.url)
+        if url and url not in links:
+            links.append(url)
+        if len(links) == 3:
+            break
+    return Idea(stock.ticker, stock.name, stock.price, percent, horizon, reason, links, note, score)
+
+
+def _money(price: float) -> str:
+    digits = 2 if price >= 10 else 4
+    text = f"{price:,.{digits}f}".replace(",", " ").replace(".", ",")
+    return text + " ₽"
+
+
+def _pct(value: float) -> str:
+    if abs(value - round(value)) < 0.05:
+        return f"{value:+.0f}%"
+    return f"{value:+.1f}%".replace(".", ",")
+
+
+def format_digest(ideas: list[Idea], when: dt.datetime, gap: str | None, asked: int) -> str:
+    lines = [f"📈 Идеи по акциям на {when.strftime('%d.%m.%Y')}", ""]
+    if gap:
+        lines.append(gap)
+        lines.append("")
+    if not ideas:
+        lines.append("В свежих новостях не нашлось бумаг Мосбиржи с ценой последней сделки.")
+        lines.append("")
+        lines.append(DISCLAIMER)
+        return "\n".join(lines)
+    for index, idea in enumerate(ideas, start=1):
+        lines.append(f"{index}. {idea.name} ({idea.ticker}) — {_money(idea.price)}")
+        lines.append(f"   Рост: {_pct(idea.growth_percent)} ({idea.growth_note})")
+        lines.append(f"   Срок: {idea.horizon}")
+        lines.append(f"   Почему: {idea.reason}")
+        if idea.sources:
+            lines.append("   Источники: " + " ".join(idea.sources))
+        lines.append("")
+    if len(ideas) < asked:
+        lines.append(f"В свежих новостях нашлось {len(ideas)} из {asked} бумаг с ценой последней сделки.")
+        lines.append("")
+    lines.append(DISCLAIMER)
     return "\n".join(lines)
 
 
+async def _fetch(session: aiohttp.ClientSession, url: str, timeout: float) -> str | None:
+    try:
+        async with session.get(url, headers=HEADERS, allow_redirects=True,
+                                timeout=aiohttp.ClientTimeout(total=timeout)) as response:
+            if response.status != 200:
+                log.warning("Источник %s ответил %s", url, response.status)
+                return None
+            return await response.text()
+    except Exception as exc:
+        log.warning("Источник не открылся: %s (%s)", url, type(exc).__name__)
+        return None
+
+
+async def load_news(session: aiohttp.ClientSession) -> tuple[list[NewsItem], str | None]:
+    rbc_rss_task = asyncio.create_task(_fetch(session, RBC_RSS, 8))
+    rbc_page, finam, smart_page, smart_rss = await asyncio.gather(
+        _fetch(session, RBC_PAGE, 18),
+        _fetch(session, FINAM_RSS, 18),
+        _fetch(session, SMART_PAGE, 18),
+        _fetch(session, SMART_RSS, 18),
+    )
+    rbc = parse_rbc_html(rbc_page or "")
+    if len(rbc) >= 5:
+        rbc_rss_task.cancel()
+        try:
+            await rbc_rss_task
+        except asyncio.CancelledError:
+            pass
+    else:
+        rbc = _dedupe(rbc + parse_rss((await rbc_rss_task) or "", "РБК"))
+    news = list(rbc)
+    news.extend(parse_rss(finam or "", "Финам"))
+    news.extend(parse_smartlab_html(smart_page or ""))
+    news.extend(parse_rss(smart_rss or "", "Smart-Lab"))
+    gap = None
+    if not rbc:
+        fallback = parse_rss(await _fetch(session, KOMMERSANT_RSS, 18) or "", "Коммерсантъ")
+        news.extend(fallback)
+        gap = RBC_GAP if fallback else RBC_GAP_EMPTY
+        log.warning("РБК не отдал новости, запасной источник: %s материалов", len(fallback))
+    return news, gap
+
+
+async def load_stocks(session: aiohttp.ClientSession) -> tuple[dict[str, Stock], dict]:
+    raw = None
+    for attempt in range(2):
+        raw = await _fetch(session, MOEX_URL, 25)
+        if raw:
+            break
+        log.warning("Повторный запрос цен Мосбиржи (%s)", attempt + 1)
+    if not raw:
+        raise RuntimeError("Не удалось получить цены LAST с Мосбиржи (iss.moex.com).")
+    payload = json.loads(raw)
+    stocks = parse_moex(payload)
+    if not stocks:
+        raise RuntimeError("На TQBR нет бумаг с ценой LAST.")
+    meta: dict[str, tuple[set[tuple[str, bool]], bool]] = {}
+    sec_cols = payload["securities"]["columns"]
+    i_id, i_short, i_name = (sec_cols.index(name) for name in ("SECID", "SHORTNAME", "SECNAME"))
+    by_id = {row[i_id]: row for row in payload["securities"]["data"]}
+    for ticker in stocks:
+        row = by_id.get(ticker)
+        if row is None:
+            meta[ticker] = (set(), False)
+            continue
+        short, secname = row[i_short] or "", row[i_name] or ""
+        preferred = is_preferred(short, secname)
+        meta[ticker] = (aliases_for(ticker, short, secname, preferred), preferred)
+    return stocks, meta
+
+
+async def build_digest(count: int, session: aiohttp.ClientSession | None = None,
+                        now: dt.datetime | None = None) -> str:
+    own = session is None
+    if session is None:
+        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20), trust_env=False)
+    try:
+        stocks_result, news_result = await asyncio.gather(
+            load_stocks(session),
+            load_news(session),
+        )
+    finally:
+        if own:
+            await session.close()
+    stocks, meta = stocks_result
+    news, gap = news_result
+    ideas = build_ideas(stocks, meta, news, count)
+    when = now or dt.datetime.now(MSK)
+    log.info("Подборка /stocks: %s", ", ".join(idea.ticker for idea in ideas) or "пусто")
+    return format_digest(ideas, when, gap, count)
+
+
 class StocksDigest:
-    def __init__(self, bot: Bot, owner_id: int, chat: ClaudeChat | None, at: str, count: int):
+    def __init__(self, bot: Bot, owner_id: int, count: int):
         self.bot = bot
         self.owner_id = owner_id
-        self.chat = chat
-        self.hour, self.minute = (int(x) for x in at.split(":"))
-        self.count = count
+        self.count = count if count > 0 else 5
         self._lock = asyncio.Lock()
 
     async def build(self) -> str:
-        if not self.chat:
-            return "Для подборки по акциям нужен ключ Anthropic (ANTHROPIC_API_KEY в .env)."
         async with self._lock:
-            result = await research(self.chat, self.count)
-            tickers = [i["ticker"].strip().upper() for i in result["ideas"]]
-            prices = await moex_prices(tickers)
-            return format_ideas(result, prices)
+            return await build_digest(self.count)
 
     async def send(self) -> None:
         try:
             text = await self.build()
-        except Exception as e:
+        except Exception as exc:
             log.exception("Не удалось подготовить подборку по акциям")
-            text = f"⚠️ Не удалось подготовить подборку по акциям: {e}"
-        for i in range(0, len(text), 4000):
-            await self.bot.send_message(self.owner_id, text[i : i + 4000], disable_web_page_preview=True)
-
-    def _next_run(self, now: dt.datetime) -> dt.datetime:
-        run = now.replace(hour=self.hour, minute=self.minute, second=0, microsecond=0)
-        if run <= now:
-            run += dt.timedelta(days=1)
-        while run.weekday() >= 5:  # суббота, воскресенье
-            run += dt.timedelta(days=1)
-        return run
-
-    async def run_forever(self) -> None:
-        while True:
-            now = dt.datetime.now(MSK)
-            run = self._next_run(now)
-            log.info("Следующая подборка по акциям: %s", run.strftime("%d.%m %H:%M"))
-            await asyncio.sleep((run - now).total_seconds())
-            await self.send()
+            text = f"⚠️ Не удалось подготовить подборку по акциям: {exc}"
+        for offset in range(0, len(text), 4000):
+            await self.bot.send_message(
+                self.owner_id, text[offset : offset + 4000], disable_web_page_preview=True
+            )
 
     def router(self) -> Router:
         router = Router()
@@ -247,7 +841,7 @@ class StocksDigest:
 
         @router.message(Command("stocks"))
         async def cmd_stocks(message: Message) -> None:
-            await message.answer("Готовлю подборку, это займёт несколько минут…")
+            await message.answer("Собираю подборку по новостям и ценам Мосбиржи…")
             await self.send()
 
         return router
